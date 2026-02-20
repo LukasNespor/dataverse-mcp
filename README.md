@@ -77,7 +77,7 @@ Add the following, replacing the path with the absolute path to your cloned repo
       "args": [
         "compose",
         "-f", "/absolute/path/to/dataverse-mcp/docker-compose.yml",
-        "run", "--rm", "-i",
+        "run", "--rm", "-i", "--service-ports",
         "dataverse-mcp"
       ]
     }
@@ -90,7 +90,7 @@ Add the following, replacing the path with the absolute path to your cloned repo
 "args": [
   "compose",
   "-f", "C:/Users/yourname/dataverse-mcp/docker-compose.yml",
-  "run", "--rm", "-i",
+  "run", "--rm", "-i", "--service-ports",
   "dataverse-mcp"
 ]
 ```
@@ -256,3 +256,5 @@ stale data. Ask Claude to call `Refresh schema cache` for the affected table, th
 
 **Port 8199 already in use (Claude Code)** — Change the port in `docker-compose.sse.yml`
 and update the `claude mcp add` URL accordingly.
+
+**Port 5577 refused during sign-in (macOS)** — On macOS, `docker compose run` does not publish container ports by default. Add `"--service-ports"` to the `args` array in your `claude_desktop_config.json` (as shown in the configuration example above). If port 5577 is already allocated from a previous failed attempt, run `docker compose down` and remove stale containers before retrying.
