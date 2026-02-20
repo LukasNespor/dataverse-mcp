@@ -1,0 +1,19 @@
+# SSE transport override for Claude Code and other persistent MCP clients.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.sse.yml up -d
+#
+# This override:
+#   - Exposes port 8199 on the host
+#   - Switches the FastMCP transport from stdio to SSE
+#
+# After starting, add to Claude Code with:
+#   claude mcp add dataverse --transport sse http://localhost:8199/sse
+
+services:
+  dataverse-mcp:
+    ports:
+      - "8199:8000"
+    environment:
+      MCP_TRANSPORT: "sse"
+      MCP_HOST: "0.0.0.0"

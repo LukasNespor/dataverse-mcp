@@ -1,0 +1,12 @@
+# Environment — contains your passphrase and URLs, never commit this
+.env
+
+# Claude Code
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/

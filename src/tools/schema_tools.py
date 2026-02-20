@@ -1,0 +1,149 @@
+"""
+Schema discovery, user identity, and cache management tools.
+
+These tools provide the metadata the agent needs to construct correct
+Dataverse API calls — field names, types, required fields, and the
+current authenticated user's identity.
+"""
+
+import logging
+from typing import Any, Optional
+
+import cache
+import dataverse
+from auth import AuthenticationRequiredError
+
+logger = logging.getLogger(__name__)
+
+
+async def tool_whoami() -> Any:
+    """
+    Return the identity of the currently authenticated Dataverse (CRM) user.
+
+    Results are cached permanently for the current session and persist across
+    container restarts — the API is only called once after authentication.
+    Call this freely; it will not make a network request if the cache is warm.
+
+    Call this tool when:
+    - You need the current user's ID to set an owner field on a new record
+      (e.g. creating an appointment, task, or phonecall "for me" or "assigned to me")
+    - You need to filter records by the current user (e.g. "show my open cases")
+    - You want to confirm which user account is active after authentication
+    - Any operation that requires "systemuserid" or "ownerid" of the calling user
+
+    Returns a dict with:
+    - UserId (str): GUID of the authenticated Dataverse user. Use this when:
+        - Setting ownerid: "ownerid@odata.bind": "/systemusers/<UserId>"
+        - Filtering by owner: "$filter=_ownerid_value eq <UserId>"
+        - Setting any field that expects the current user's systemuser GUID
+    - FullName (str): Display name of the authenticated user (e.g. "John Doe").
+      After successful sign-in, greet the user by their full name.
+    - BusinessUnitId (str): GUID of the user's business unit
+    - OrganizationId (str): GUID of the Dataverse organization
+    """
+    try:
+        return await dataverse.whoami()
+    except AuthenticationRequiredError:
+        return (
+            "`whoami` failed: not authenticated. "
+            "Call `Sign in to Dataverse` to sign in, then retry."
+        )
+    except Exception as e:
+        logger.exception("whoami failed")
+        return f"Failed to retrieve user identity: {e}"
+
+
+async def tool_get_schema(table_names: Optional[list[str]] = None) -> Any:
+    """
+    Retrieve the schema (entity definition and field metadata) for one or more Dataverse (CRM) tables.
+
+    Results are cached for 1 hour per table and persist across container restarts.
+    Subsequent calls for the same table within the TTL return instantly from cache
+    without making any API requests. You can call this tool before every create/update
+    without worrying about performance overhead once the schema is cached.
+
+    Call this tool BEFORE creating or updating any record to ensure you use the correct:
+    - Field LogicalNames (the API names, not display names — they differ and are case-sensitive)
+    - Field types (determines how to format the value: string, int, DateTime, lookup, etc.)
+    - Required fields (RequiredLevel = "SystemRequired" or "ApplicationRequired" must be provided
+      when creating a record, or the API will return a 400 error)
+    - PrimaryIdAttribute (the GUID field name you receive after creation and need for updates/deletes)
+
+    Also call this tool when:
+    - The user asks about what fields a table has
+    - You are unsure whether a table called "appointment" uses entity set name "appointments"
+    - You need to find the correct OptionSet integer values for a picklist field
+    - If schema seems stale or wrong, call `invalidate_cache` first then retry
+
+    Parameters:
+    - table_names (optional): List of table LogicalNames to fetch schema for.
+      LogicalName is the singular, lowercase API name — e.g. ["appointment", "contact", "account"].
+      If omitted or empty, returns the list of ALL tables without attributes (lightweight index).
+      To get field-level details (attributes), always provide specific table names.
+
+    Returns a list of entity definitions, each containing:
+    - LogicalName: singular API name (e.g. "appointment")
+    - DisplayName: human-readable label shown in the UI
+    - PrimaryIdAttribute: GUID primary key field name (e.g. "activityid", "contactid")
+    - PrimaryNameAttribute: main display field name (e.g. "subject", "fullname")
+    - Attributes (only when specific tables are requested): list of fields, each with:
+        - LogicalName: field API name to use in data payloads, $select, and $filter
+        - DisplayName: human-readable label
+        - AttributeType: data type — format values accordingly:
+            String / Memo   → plain string
+            Integer         → whole number
+            Decimal / Money → decimal number
+            DateTime        → ISO 8601 UTC string e.g. "2024-06-15T14:30:00Z"
+            Boolean         → true / false
+            Picklist / Status / State → integer option value
+            Lookup          → OData bind: "fieldname@odata.bind": "/entityset(<GUID>)"
+        - RequiredLevel: "None" | "Recommended" | "ApplicationRequired" | "SystemRequired"
+          Fields with ApplicationRequired or SystemRequired MUST be included on create.
+        - Description: additional context about the field's purpose
+    """
+    try:
+        return await dataverse.get_table_schema(table_names=table_names)
+    except AuthenticationRequiredError:
+        return (
+            "`get_schema` failed: not authenticated. "
+            "Call `Sign in to Dataverse` to sign in, then retry."
+        )
+    except Exception as e:
+        logger.exception("get_schema failed for %s", table_names)
+        return f"Failed to retrieve schema for {table_names}: {e}"
+
+
+async def tool_invalidate_cache(table_name: Optional[str] = None) -> str:
+    """
+    Invalidate cached schema data to force a fresh fetch from the Dataverse (CRM) API.
+
+    Call this tool when:
+    - The user reports that field names, table structure, or required fields seem wrong or outdated
+    - You know that a Dataverse administrator has recently made customization changes
+      (added/removed fields, changed required levels, renamed entities)
+    - A create or update call fails with an unexpected "attribute does not exist" error
+      and the schema cache may be serving stale data
+
+    Do NOT call this routinely — schema changes in Dataverse require admin action and are rare.
+    The schema cache has a 1-hour TTL and expires automatically under normal circumstances.
+
+    Parameters:
+    - table_name (optional): LogicalName of a specific table to invalidate (e.g. "appointment").
+      If omitted, invalidates the entire schema cache for all tables.
+      The WhoAmI identity cache is never affected by this tool.
+
+    Returns a confirmation of what was invalidated. The next call to `get_schema`
+    for the affected table(s) will fetch fresh data from the API and re-populate the cache.
+    """
+    if table_name:
+        cache.invalidate_schema(table_name)
+        return (
+            f"Schema cache invalidated for table '{table_name}'. "
+            f"The next call to `get_schema` for this table will fetch fresh data from the API."
+        )
+    else:
+        cache.invalidate_schema()
+        return (
+            "Entire schema cache invalidated. "
+            "The next call to `get_schema` for any table will fetch fresh data from the API."
+        )

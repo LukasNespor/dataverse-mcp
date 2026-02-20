@@ -1,0 +1,25 @@
+services:
+  dataverse-mcp:
+    build: .
+    container_name: dataverse-mcp
+    environment:
+      # Required: your Dataverse environment URL (no trailing slash)
+      - DATAVERSE_URL=${DATAVERSE_URL}
+      # Optional: defaults to "common" (works for most single-tenant orgs)
+      - TENANT_ID=${TENANT_ID:-common}
+      # Required: Azure AD Application (client) ID from your Entra ID app registration
+      - CLIENT_ID=${CLIENT_ID}
+      # Optional: fixed port for interactive auth redirect server (must match published port below)
+      - AUTH_REDIRECT_PORT=${AUTH_REDIRECT_PORT:-5577}
+    ports:
+      # Interactive auth redirect — browser redirects here after sign-in
+      - "${AUTH_REDIRECT_PORT:-5577}:${AUTH_REDIRECT_PORT:-5577}"
+    volumes:
+      # Persist the token cache across container restarts
+      - dataverse-data:/data
+    stdin_open: true   # Required for stdio MCP transport
+    tty: false
+    restart: unless-stopped
+
+volumes:
+  dataverse-data:

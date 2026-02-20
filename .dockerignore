@@ -1,0 +1,14 @@
+.env*
+.git
+.gitignore
+.claude/
+.dockerignore
+data/
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+README.md
+QUICKSTART.md
+docker-compose*.yml
