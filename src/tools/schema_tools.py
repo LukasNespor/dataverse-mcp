@@ -20,8 +20,7 @@ async def tool_whoami() -> Any:
     """
     Return the identity of the currently authenticated Dataverse (CRM) user.
 
-    Results are cached permanently for the current session and persist across
-    container restarts — the API is only called once after authentication.
+    Results are cached for 24 hours and persist across container restarts.
     Call this freely; it will not make a network request if the cache is warm.
 
     Call this tool when:
@@ -40,17 +39,53 @@ async def tool_whoami() -> Any:
       After successful sign-in, greet the user by their full name.
     - BusinessUnitId (str): GUID of the user's business unit
     - OrganizationId (str): GUID of the Dataverse organization
+    - TimeZoneCode (int): The user's Dataverse timezone code (e.g. 110)
+    - TimeZoneName (str): Windows timezone name (e.g. "Central Europe Standard Time").
+      Use this to convert user-local times to UTC before sending DateTime values to Dataverse.
+      When a user says "10 AM" without specifying a timezone, interpret it in their TimeZoneName
+      timezone and convert to UTC.
     """
     try:
         return await dataverse.whoami()
     except AuthenticationRequiredError:
         return (
             "`whoami` failed: not authenticated. "
-            "Call `Sign in to Dataverse` to sign in, then retry."
+            "Call `Sign_in_to_Dataverse` to sign in, then retry."
         )
     except Exception as e:
         logger.exception("whoami failed")
         return f"Failed to retrieve user identity: {e}"
+
+
+async def tool_list_tables() -> Any:
+    """
+    Return a lightweight list of all tables (entities) in the Dataverse environment.
+
+    Results are cached for 24 hours, so this call is very cheap after the first fetch.
+    Each entry contains:
+    - LogicalName: the singular API name to pass to `Get_table_schema` (e.g. "account")
+    - DisplayName: the human-readable label shown in the CRM UI (e.g. "Account")
+    - EntitySetName: the plural collection name used in API URLs (e.g. "accounts")
+    - IsCustomEntity: whether this is a custom (non-system) table
+
+    Call this tool when:
+    - You need to find the correct LogicalName for a table the user mentions by display name
+    - You are unsure which EntitySetName to use for List_records, Create_record, etc.
+    - You want to browse available tables in the environment
+
+    After finding the table you need, call `Get_table_schema` with the LogicalName
+    to get the full field-level metadata (attributes, types, required fields).
+    """
+    try:
+        return await dataverse.list_tables()
+    except AuthenticationRequiredError:
+        return (
+            "`list_tables` failed: not authenticated. "
+            "Call `Sign in to Dataverse` to sign in, then retry."
+        )
+    except Exception as e:
+        logger.exception("list_tables failed")
+        return f"Failed to retrieve table list: {e}"
 
 
 async def tool_get_schema(table_names: Optional[list[str]] = None) -> Any:
@@ -71,15 +106,16 @@ async def tool_get_schema(table_names: Optional[list[str]] = None) -> Any:
 
     Also call this tool when:
     - The user asks about what fields a table has
-    - You are unsure whether a table called "appointment" uses entity set name "appointments"
     - You need to find the correct OptionSet integer values for a picklist field
-    - If schema seems stale or wrong, call `invalidate_cache` first then retry
+    - If schema seems stale or wrong, call `Refresh_schema_cache` first then retry
+
+    If you don't know the exact LogicalName or EntitySetName of a table, call `List_tables`
+    first — it returns a cached lightweight index of all tables with their names.
 
     Parameters:
-    - table_names (optional): List of table LogicalNames to fetch schema for.
+    - table_names (required): List of table LogicalNames to fetch schema for.
       LogicalName is the singular, lowercase API name — e.g. ["appointment", "contact", "account"].
-      If omitted or empty, returns the list of ALL tables without attributes (lightweight index).
-      To get field-level details (attributes), always provide specific table names.
+      Always provide specific table names to get field-level details.
 
     Returns a list of entity definitions, each containing:
     - LogicalName: singular API name (e.g. "appointment")
@@ -106,7 +142,7 @@ async def tool_get_schema(table_names: Optional[list[str]] = None) -> Any:
     except AuthenticationRequiredError:
         return (
             "`get_schema` failed: not authenticated. "
-            "Call `Sign in to Dataverse` to sign in, then retry."
+            "Call `Sign_in_to_Dataverse` to sign in, then retry."
         )
     except Exception as e:
         logger.exception("get_schema failed for %s", table_names)
@@ -143,7 +179,8 @@ async def tool_invalidate_cache(table_name: Optional[str] = None) -> str:
         )
     else:
         cache.invalidate_schema()
+        cache.invalidate_tables()
         return (
-            "Entire schema cache invalidated. "
-            "The next call to `get_schema` for any table will fetch fresh data from the API."
+            "Entire schema cache invalidated (including table list). "
+            "The next call to `Get_table_schema` or `List_tables` will fetch fresh data from the API."
         )

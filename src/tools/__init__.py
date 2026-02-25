@@ -10,6 +10,7 @@ from tools.record_tools import (
 )
 from tools.schema_tools import (
     tool_whoami,
+    tool_list_tables,
     tool_get_schema,
     tool_invalidate_cache,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "tool_update_record",
     "tool_delete_record",
     "tool_whoami",
+    "tool_list_tables",
     "tool_get_schema",
     "tool_invalidate_cache",
 ]

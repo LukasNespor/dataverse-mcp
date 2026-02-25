@@ -108,14 +108,15 @@ async def whoami() -> dict:
     """
     Return the identity of the currently authenticated Dataverse user.
 
-    Results are cached permanently for the current session (WhoAmI never changes
-    mid-session). The cache is invalidated automatically when the user re-authenticates.
-    API is only called on first use or after cache invalidation.
+    Results are cached for 24 hours. The cache is invalidated automatically when
+    the user re-authenticates. API is only called on first use, after cache
+    expiry, or after explicit invalidation.
 
     Returns:
       - UserId (str): GUID of the authenticated user — use for owner/assignee fields.
       - BusinessUnitId (str): GUID of the user's business unit.
       - OrganizationId (str): GUID of the Dataverse organization.
+      - FullName (str): Display name of the authenticated user.
     """
     cached = cache.get_whoami()
     if cached is not None:
@@ -142,6 +143,30 @@ async def whoami() -> dict:
             data["FullName"] = user.get("fullname")
         except Exception as e:
             logger.warning("Failed to fetch user fullname: %s", e)
+
+        # Fetch the user's timezone from usersettings + timezonedefinitions
+        try:
+            tz_settings = await _request(
+                "GET",
+                f"/usersettingscollection({user_id})",
+                params={"$select": "timezonecode"},
+            )
+            tz_code = tz_settings.get("timezonecode")
+            if tz_code is not None:
+                data["TimeZoneCode"] = tz_code
+                tz_defs = await _request(
+                    "GET",
+                    "/timezonedefinitions",
+                    params={
+                        "$filter": f"timezonecode eq {tz_code}",
+                        "$select": "standardname,userinterfacename",
+                    },
+                )
+                tz_values = tz_defs.get("value", [])
+                if tz_values:
+                    data["TimeZoneName"] = tz_values[0].get("standardname")
+        except Exception as e:
+            logger.warning("Failed to fetch user timezone: %s", e)
 
     cache.set_whoami(data)
     return data
@@ -220,6 +245,46 @@ async def delete_record(table: str, record_id: str) -> None:
     This action is irreversible.
     """
     await _request("DELETE", f"/{table}({record_id})")
+
+
+async def list_tables() -> list[dict]:
+    """
+    Return a lightweight list of all Dataverse tables with basic identifiers.
+
+    Results are cached for 24 hours. Each entry contains LogicalName,
+    DisplayName, EntitySetName, and IsCustomEntity — enough to look up the
+    correct table name before calling get_table_schema() for field details.
+    """
+    cached = cache.get_tables()
+    if cached is not None:
+        logger.debug("Tables list served from cache (%d tables)", len(cached))
+        return cached
+
+    logger.debug("Tables list cache miss — fetching from API")
+    result = await _request(
+        "GET",
+        "/EntityDefinitions",
+        params={"$select": "LogicalName,DisplayName,EntitySetName,IsCustomEntity"},
+    )
+
+    def label(obj) -> Optional[str]:
+        if not obj:
+            return None
+        lv = obj.get("LocalizedLabels", [])
+        return lv[0].get("Label") if lv else (obj.get("UserLocalizedLabel") or {}).get("Label")
+
+    cleaned = [
+        {
+            "LogicalName": e.get("LogicalName"),
+            "DisplayName": label(e.get("DisplayName")),
+            "EntitySetName": e.get("EntitySetName"),
+            "IsCustomEntity": e.get("IsCustomEntity"),
+        }
+        for e in result.get("value", [])
+    ]
+
+    cache.set_tables(cleaned)
+    return cleaned
 
 
 async def get_table_schema(table_names: Optional[list[str]] = None) -> list[dict]:

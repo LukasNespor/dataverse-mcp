@@ -22,6 +22,7 @@ from tools import (
     tool_get_schema,
     tool_invalidate_cache,
     tool_list_records,
+    tool_list_tables,
     tool_update_record,
     tool_whoami,
 )
@@ -42,7 +43,7 @@ mcp = FastMCP(
     name="Dataverse MCP Server",
     instructions="""
 You are connected to a Microsoft Dataverse (CRM) environment via its Web API.
-When the user says "CRM" or "Dataverse", they mean the same system.
+When the user says "CRM" or "Dataverse" or "Dynamics", they mean the same system.
 
 AUTHENTICATION:
 - Just call Dataverse tools directly. If a tool returns an error mentioning authentication,
@@ -53,15 +54,19 @@ AUTHENTICATION:
 - To sign out (e.g. to switch accounts), call `Sign_out_from_Dataverse`.
 
 BEFORE CREATING OR UPDATING ANY RECORD:
-1. Call `Get_table_schema` with the target table's LogicalName to retrieve field names,
+1. If you don't know the exact table LogicalName, call `List_tables` first.
+   It returns a cached (24h) lightweight list of all tables with LogicalName, DisplayName,
+   and EntitySetName — enough to find the right table name. This call is very cheap.
+2. Call `Get_table_schema` with the target table's LogicalName to retrieve field names,
    types, and required fields. Never guess field names — Dataverse is strict about them.
    Schema results are cached for 1 hour — you do not need to re-fetch them within a session.
-2. Call `Get_my_identity` if the operation involves the current user's identity (owner, assignee, etc.).
-   The result is cached permanently for the session — call it freely without worrying about cost.
+3. Call `Get_my_identity` if the operation involves the current user's identity (owner, assignee, etc.).
+   The result is cached for 24 hours — call it freely without worrying about cost.
 
 TABLE AND FIELD NAMING:
 - Table LogicalNames are singular lowercase: "appointment", "contact", "account", "lead".
-- The entity set name used in API calls is usually the plural: "appointments", "contacts".
+- The entity set name (EntitySetName) used in API URLs is usually the plural: "appointments", "contacts".
+  If unsure of the EntitySetName, call `List_tables` to look it up.
 - Field LogicalNames are lowercase with underscores: "scheduledstart", "regardingobjectid".
 - Never use display names (like "Start Time") in API calls — always use LogicalNames.
 
@@ -70,8 +75,19 @@ LOOKUP FIELDS:
   "ownerid@odata.bind": "/systemusers/<GUID>"
   "regardingobjectid_contact@odata.bind": "/contacts/<GUID>"
 
-DATES:
-- All DateTime values must be ISO 8601 UTC: "2024-06-15T14:30:00Z"
+DATES AND TIMEZONES:
+- When the user specifies a time without an explicit timezone (e.g. "10 AM", "tomorrow at 3 PM"),
+  treat it as local time in the user's timezone. Call `Get_my_identity` to get the user's
+  `TimeZoneName` (e.g. "Central Europe Standard Time"), then convert to UTC before sending to the API.
+- DateTime fields: ISO 8601 UTC with time, e.g. "2024-06-15T14:30:00Z"
+- DateOnly fields: date part only, e.g. "2024-06-15"
+
+APPOINTMENTS:
+- When creating an appointment, ask the user if they want it to sync to Outlook.
+- If yes, set the Organizer field to the current user:
+  "organizer@odata.bind": "/systemusers(<UserId>)"
+  (call `Get_my_identity` to get the UserId). This makes the appointment appear in the user's
+  Outlook calendar via server-side sync.
 
 DELETION:
 - Always confirm with the user before deleting. Prefer deactivating (statecode=1) over deletion
@@ -86,8 +102,11 @@ CACHE:
 mcp.tool(name="Sign_in_to_Dataverse", description=tool_authenticate.__doc__)(tool_authenticate)
 mcp.tool(name="Sign_out_from_Dataverse", description=tool_sign_out.__doc__)(tool_sign_out)
 mcp.tool(name="Get_my_identity", description=tool_whoami.__doc__)(tool_whoami)
+
+mcp.tool(name="List_tables", description=tool_list_tables.__doc__)(tool_list_tables)
 mcp.tool(name="Get_table_schema", description=tool_get_schema.__doc__)(tool_get_schema)
 mcp.tool(name="Refresh_schema_cache", description=tool_invalidate_cache.__doc__)(tool_invalidate_cache)
+
 mcp.tool(name="List_records", description=tool_list_records.__doc__)(tool_list_records)
 mcp.tool(name="Create_record", description=tool_create_record.__doc__)(tool_create_record)
 mcp.tool(name="Update_record", description=tool_update_record.__doc__)(tool_update_record)
