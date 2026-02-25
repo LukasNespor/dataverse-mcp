@@ -12,7 +12,9 @@ sign-in (no client secrets required) with persistent token and schema caching.
 | Tool | Cached | Description |
 |---|---|---|
 | `Sign in to Dataverse` | — | Start interactive browser sign-in; returns a URL, token exchange happens automatically on redirect |
-| `Get my identity` | Permanent | Get the current user's Dataverse GUID, business unit, and org ID |
+| `Sign out from Dataverse` | — | Sign out and clear cached identity; use to switch accounts |
+| `Get my identity` | 24 hour TTL | Get the current user's GUID, display name, business unit, org ID, and timezone |
+| `List tables` | 24 hour TTL | List all tables with LogicalName, DisplayName, and EntitySetName |
 | `Get table schema` | 1 hour TTL | Retrieve field definitions, types, and required fields per table |
 | `Refresh schema cache` | — | Force a fresh schema fetch; use if schema seems stale after customizations |
 | `List records` | — | Query records with OData $filter, $select, $orderby, and pagination |
@@ -72,7 +74,7 @@ Add the following, replacing the path with the absolute path to your cloned repo
 ```json
 {
   "mcpServers": {
-    "dataverse": {
+    "Dataverse": {
       "command": "docker",
       "args": [
         "compose",
