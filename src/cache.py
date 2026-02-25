@@ -9,19 +9,27 @@ Two-layer caching strategy:
 Cache file location: /data/token_cache_appcache.json (derived from the token cache path)
 
 TTL policy:
-  - WhoAmI: never expires. The authenticated user identity does not change
-    unless the user re-authenticates with a different account, at which point
-    the cache is explicitly invalidated by calling invalidate_whoami().
+  - WhoAmI: 24 hours (WHOAMI_CACHE_TTL_SECONDS). User settings like timezone
+    can change, so periodic refresh is needed. Also invalidated explicitly
+    when the user re-authenticates with a different account.
   - Table schema: configurable TTL via SCHEMA_CACHE_TTL_SECONDS (default 3600s / 1 hour).
     Dataverse schema changes are rare (require admin customization), so 1 hour is conservative.
     Set to 0 to disable schema caching entirely.
+  - Table list: 24 hours (TABLES_CACHE_TTL_SECONDS). The set of tables in a Dataverse
+    environment changes very rarely. Used by the List_tables tool for quick name lookups.
 
 Cache file structure:
 {
   "whoami": {
-    "UserId": "...",
-    "BusinessUnitId": "...",
-    "OrganizationId": "..."
+    "cached_at": 1718000000.0,
+    "data": {
+      "UserId": "...",
+      "FullName": "...",
+      "BusinessUnitId": "...",
+      "OrganizationId": "...",
+      "TimeZoneCode": 110,
+      "TimeZoneName": "Central Europe Standard Time"
+    }
   },
   "schema": {
     "appointment": {
@@ -29,6 +37,10 @@ Cache file structure:
       "data": { ...cleaned entity dict... }
     },
     "contact": { ... }
+  },
+  "tables": {
+    "cached_at": 1718000000.0,
+    "data": [ ...list of table dicts... ]
   }
 }
 """
@@ -48,7 +60,9 @@ logger = logging.getLogger(__name__)
 # Configuration
 # ---------------------------------------------------------------------------
 
-SCHEMA_CACHE_TTL_SECONDS: int = 3600  # 1 hour; set to 0 to disable
+WHOAMI_CACHE_TTL_SECONDS: int = 86400  # 24 hours
+SCHEMA_CACHE_TTL_SECONDS: int = 3600   # 1 hour; set to 0 to disable
+TABLES_CACHE_TTL_SECONDS: int = 86400  # 24 hours
 
 # ---------------------------------------------------------------------------
 # Internal state
@@ -58,6 +72,7 @@ SCHEMA_CACHE_TTL_SECONDS: int = 3600  # 1 hour; set to 0 to disable
 _mem: dict[str, Any] = {
     "whoami": None,       # dict | None
     "schema": {},         # {table_logical_name: {"cached_at": float, "data": dict}}
+    "tables": None,       # {"cached_at": float, "data": list[dict]} | None
 }
 
 _dirty: bool = False      # True when in-memory state differs from last disk write
@@ -91,15 +106,22 @@ def load_from_disk() -> None:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
 
-        _mem["whoami"] = data.get("whoami")
+        raw_whoami = data.get("whoami")
+        # Migrate old format (plain dict) to new format — expire immediately
+        # so the next whoami() call fetches fresh data with timezone fields
+        if isinstance(raw_whoami, dict) and "cached_at" not in raw_whoami:
+            raw_whoami = {"cached_at": 0, "data": raw_whoami}
+        _mem["whoami"] = raw_whoami
         _mem["schema"] = data.get("schema", {})
+        _mem["tables"] = data.get("tables")
         _dirty = False
 
         whoami_loaded = "yes" if _mem["whoami"] else "no"
         schema_tables = list(_mem["schema"].keys())
+        tables_loaded = "yes" if _mem["tables"] else "no"
         logger.info(
-            "App cache loaded from %s — whoami: %s, schema tables: %s",
-            path, whoami_loaded, schema_tables or "none",
+            "App cache loaded from %s — whoami: %s, schema tables: %s, tables list: %s",
+            path, whoami_loaded, schema_tables or "none", tables_loaded,
         )
     except Exception as e:
         logger.warning("Failed to load app cache from %s, starting empty: %s", path, e)
@@ -125,6 +147,7 @@ def save_to_disk() -> None:
         plaintext = json.dumps({
             "whoami": _mem["whoami"],
             "schema": _mem["schema"],
+            "tables": _mem["tables"],
         }, indent=None)
 
         tmp.write_text(plaintext, encoding="utf-8")
@@ -143,12 +166,21 @@ def save_to_disk() -> None:
 
 def get_whoami() -> Optional[dict]:
     """
-    Return the cached WhoAmI result, or None if not yet cached.
+    Return the cached WhoAmI result, or None if not cached or expired.
 
-    The result is considered permanently valid for the lifetime of the current
-    authenticated session. Call invalidate_whoami() when the user re-authenticates.
+    Expiry is checked against WHOAMI_CACHE_TTL_SECONDS (24 hours).
+    Call invalidate_whoami() when the user re-authenticates.
     """
-    return _mem["whoami"]
+    entry = _mem["whoami"]
+    if entry is None:
+        return None
+
+    age = time.time() - entry["cached_at"]
+    if age > WHOAMI_CACHE_TTL_SECONDS:
+        logger.debug("WhoAmI cache expired (age=%.0fs)", age)
+        return None
+
+    return entry["data"]
 
 
 def set_whoami(data: dict) -> None:
@@ -156,9 +188,13 @@ def set_whoami(data: dict) -> None:
     Store the WhoAmI result in memory and persist to disk.
 
     Call this immediately after a successful WhoAmI API call.
+    cached_at is set to the current Unix timestamp for TTL calculation.
     """
     global _dirty
-    _mem["whoami"] = data
+    _mem["whoami"] = {
+        "cached_at": time.time(),
+        "data": data,
+    }
     _dirty = True
     save_to_disk()
     logger.debug("WhoAmI cached: UserId=%s", data.get("UserId"))
@@ -172,11 +208,10 @@ def invalidate_whoami() -> None:
     so the next whoami() call fetches fresh identity data for the new account.
     """
     global _dirty
-    if _mem["whoami"] is not None:
-        _mem["whoami"] = None
-        _dirty = True
-        save_to_disk()
-        logger.info("WhoAmI cache invalidated")
+    _mem["whoami"] = None
+    _dirty = True
+    save_to_disk()
+    logger.info("WhoAmI cache invalidated")
 
 
 # ---------------------------------------------------------------------------
@@ -248,3 +283,57 @@ def invalidate_schema(table_name: Optional[str] = None) -> None:
 def get_cached_schema_table_names() -> list[str]:
     """Return the list of table names currently held in the schema cache (expired or not)."""
     return list(_mem["schema"].keys())
+
+
+# ---------------------------------------------------------------------------
+# Tables list cache
+# ---------------------------------------------------------------------------
+
+def get_tables() -> Optional[list[dict]]:
+    """
+    Return the cached table list, or None if not cached or expired.
+
+    Expiry is checked against TABLES_CACHE_TTL_SECONDS (24 hours).
+    """
+    entry = _mem["tables"]
+    if entry is None:
+        return None
+
+    age = time.time() - entry["cached_at"]
+    if age > TABLES_CACHE_TTL_SECONDS:
+        logger.debug("Tables list cache expired (age=%.0fs)", age)
+        return None
+
+    logger.debug("Tables list cache hit (age=%.0fs)", age)
+    return entry["data"]
+
+
+def set_tables(data: list[dict]) -> None:
+    """
+    Store the table list in memory and persist to disk.
+
+    Call this immediately after a successful EntityDefinitions API fetch.
+    """
+    global _dirty
+    _mem["tables"] = {
+        "cached_at": time.time(),
+        "data": data,
+    }
+    _dirty = True
+    save_to_disk()
+    logger.debug("Tables list cached (%d tables)", len(data))
+
+
+def invalidate_tables() -> None:
+    """
+    Clear the cached table list.
+
+    Called during full cache invalidation so the next List_tables call
+    fetches a fresh list from the API.
+    """
+    global _dirty
+    if _mem["tables"] is not None:
+        _mem["tables"] = None
+        _dirty = True
+        save_to_disk()
+        logger.info("Tables list cache invalidated")

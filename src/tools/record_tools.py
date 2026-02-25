@@ -2,12 +2,13 @@
 Dataverse record operation tools: list, create, update, delete.
 
 IMPORTANT GUIDANCE FOR THE AGENT:
-- Always call `get_schema` before creating or updating a record
+- If you don't know the exact table name, call `List_tables` first to look up the
+  correct LogicalName and EntitySetName.
+- Always call `Get_table_schema` before creating or updating a record
   to discover the correct field LogicalNames, types, and required fields.
-- Always call `whoami` before creating records that require an owner or caller ID.
-- Use the LogicalName from schema (e.g. "appointment", "contact") as the `table` parameter,
-  not the display name or plural form (the Web API uses the entity set name — check schema
-  for EntitySetName if singular LogicalName returns 404).
+- Always call `Get_my_identity` before creating records that require an owner or caller ID.
+- The `table` parameter expects the EntitySetName (plural form, e.g. "appointments", "contacts").
+  If unsure, call `List_tables` to find the correct EntitySetName.
 - For lookup fields (e.g. ownerid, regardingobjectid), use the OData binding syntax:
   "ownerid@odata.bind": "/systemusers(<GUID>)" instead of setting the raw GUID.
 - Record IDs are GUIDs in the format xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (no braces).
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 def _auth_error_message(tool_name: str) -> str:
     return (
         f"`{tool_name}` failed: not authenticated. "
-        "Call `Sign in to Dataverse` to sign in, then retry this tool."
+        "Call `Sign_in_to_Dataverse` to sign in, then retry this tool."
     )
 
 
@@ -45,7 +46,7 @@ async def tool_list_records(
     Parameters:
     - table (required): The entity set name of the table to query. This is usually the
       plural form of the LogicalName (e.g. "appointments", "contacts", "accounts").
-      If unsure, call `get_schema` to find the correct EntitySetName.
+      If unsure, call `List_tables` to find the correct EntitySetName.
     - filter (optional): OData $filter expression to restrict results.
       Examples:
         "statecode eq 0" — active records only
@@ -84,11 +85,12 @@ async def tool_create_record(table: str, data: dict) -> Any:
     Create a new record in a Dataverse (CRM) table.
 
     MANDATORY STEPS before calling this tool:
-    1. Call `get_schema` with the target table name to retrieve:
+    1. Call `List_tables` if you don't know the exact EntitySetName for the target table.
+    2. Call `Get_table_schema` with the target table's LogicalName to retrieve:
        - Correct field LogicalNames (field names are case-sensitive)
        - RequiredLevel for each field (SystemRequired/ApplicationRequired fields MUST be provided)
        - AttributeType to format values correctly
-    2. Call `whoami` if the record needs an owner, creator reference, or the current user's ID.
+    3. Call `Get_my_identity` if the record needs an owner, creator reference, or the current user's ID.
 
     Parameters:
     - table (required): The entity set name of the table (plural form, e.g. "appointments").
@@ -97,7 +99,8 @@ async def tool_create_record(table: str, data: dict) -> Any:
     Field value formatting rules:
     - String fields: plain string value
     - Integer/Decimal fields: numeric value (no quotes)
-    - DateTime fields: ISO 8601 UTC string, e.g. "2024-06-15T14:30:00Z"
+    - DateTime fields: convert user-local times to UTC using the timezone from `Get_my_identity`,
+      then format as ISO 8601 UTC string, e.g. "2024-06-15T14:30:00Z"
     - Boolean fields: true or false
     - OptionSet (picklist) fields: integer value of the option (get from schema or options endpoint)
     - Lookup fields: use OData binding syntax instead of a plain GUID:
@@ -126,9 +129,9 @@ async def tool_update_record(table: str, record_id: str, data: dict) -> Any:
     This is a non-destructive partial update — do NOT include fields you don't want to change.
 
     MANDATORY STEPS before calling this tool:
-    1. Confirm you have the correct record_id (GUID). If unsure, call `list_records` first
+    1. Confirm you have the correct record_id (GUID). If unsure, call `List_records` first
        to find the record and extract its primary ID field.
-    2. Call `get_schema` if you are unsure of the correct field LogicalNames
+    2. Call `Get_table_schema` if you are unsure of the correct field LogicalNames
        or value formats for the fields you intend to update.
 
     Parameters:
@@ -158,7 +161,7 @@ async def tool_delete_record(table: str, record_id: str) -> Any:
 
     Before calling this tool:
     1. Confirm the user explicitly wants to delete — do not delete based on ambiguous intent.
-    2. If you do not already have the record_id, call `list_records` to find the record
+    2. If you do not already have the record_id, call `List_records` to find the record
        and confirm it is the correct one before deleting.
     3. Consider whether deactivating (setting statecode=1) might be more appropriate
        than permanent deletion, especially for activities or core business records.

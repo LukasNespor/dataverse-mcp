@@ -2,7 +2,7 @@
 Authentication tools exposed via MCP.
 
 These tools manage the interactive browser authentication flow.
-The agent should call `authenticate` if any other tool returns an
+The agent should call `Sign_in_to_Dataverse` if any other tool returns an
 authentication error, then proceed with Dataverse tools once the
 user confirms they have signed in.
 """
