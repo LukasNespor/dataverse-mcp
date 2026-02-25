@@ -25,8 +25,6 @@ Cache file structure:
     "data": {
       "UserId": "...",
       "FullName": "...",
-      "BusinessUnitId": "...",
-      "OrganizationId": "...",
       "TimeZoneCode": 110,
       "TimeZoneName": "Central Europe Standard Time"
     }
@@ -34,13 +32,13 @@ Cache file structure:
   "schema": {
     "appointment": {
       "cached_at": 1718000000.0,
-      "data": { ...cleaned entity dict... }
+      "data": "Table: appointment (Appointment)\nPrimary ID: ..."
     },
     "contact": { ... }
   },
   "tables": {
     "cached_at": 1718000000.0,
-    "data": [ ...list of table dicts... ]
+    "data": "LogicalName | DisplayName | EntitySetName\naccount | Account | accounts\n..."
   }
 }
 """
@@ -71,8 +69,8 @@ TABLES_CACHE_TTL_SECONDS: int = 86400  # 24 hours
 # In-memory cache — populated on startup from disk, updated on every write
 _mem: dict[str, Any] = {
     "whoami": None,       # dict | None
-    "schema": {},         # {table_logical_name: {"cached_at": float, "data": dict}}
-    "tables": None,       # {"cached_at": float, "data": list[dict]} | None
+    "schema": {},         # {table_logical_name: {"cached_at": float, "data": str}}
+    "tables": None,       # {"cached_at": float, "data": str} | None
 }
 
 _dirty: bool = False      # True when in-memory state differs from last disk write
@@ -218,18 +216,24 @@ def invalidate_whoami() -> None:
 # Schema cache
 # ---------------------------------------------------------------------------
 
-def get_schema(table_name: str) -> Optional[dict]:
+def get_schema(table_name: str) -> Optional[str]:
     """
     Return the cached schema for a single table, or None if not cached or expired.
 
     Expiry is checked against SCHEMA_CACHE_TTL_SECONDS. A TTL of 0 disables caching
     entirely (always returns None, forcing a fresh API fetch).
+    If cached data is in old dict format (pre-compact), returns None to force re-fetch.
     """
     if SCHEMA_CACHE_TTL_SECONDS == 0:
         return None
 
     entry = _mem["schema"].get(table_name)
     if entry is None:
+        return None
+
+    # Invalidate old dict-format cache entries (pre-compact text format)
+    if not isinstance(entry.get("data"), str):
+        logger.debug("Schema cache format mismatch for '%s', forcing re-fetch", table_name)
         return None
 
     age = time.time() - entry["cached_at"]
@@ -241,9 +245,9 @@ def get_schema(table_name: str) -> Optional[dict]:
     return entry["data"]
 
 
-def set_schema(table_name: str, data: dict) -> None:
+def set_schema(table_name: str, data: str) -> None:
     """
-    Store the schema for a single table in memory and persist to disk.
+    Store the compact text schema for a single table in memory and persist to disk.
 
     Call this immediately after a successful schema API fetch.
     cached_at is set to the current Unix timestamp for TTL calculation.
@@ -289,14 +293,20 @@ def get_cached_schema_table_names() -> list[str]:
 # Tables list cache
 # ---------------------------------------------------------------------------
 
-def get_tables() -> Optional[list[dict]]:
+def get_tables() -> Optional[str]:
     """
     Return the cached table list, or None if not cached or expired.
 
     Expiry is checked against TABLES_CACHE_TTL_SECONDS (24 hours).
+    If cached data is in old list format (pre-compact), returns None to force re-fetch.
     """
     entry = _mem["tables"]
     if entry is None:
+        return None
+
+    # Invalidate old list-format cache entries (pre-compact text format)
+    if not isinstance(entry.get("data"), str):
+        logger.debug("Tables list cache format mismatch, forcing re-fetch")
         return None
 
     age = time.time() - entry["cached_at"]
@@ -308,9 +318,9 @@ def get_tables() -> Optional[list[dict]]:
     return entry["data"]
 
 
-def set_tables(data: list[dict]) -> None:
+def set_tables(data: str) -> None:
     """
-    Store the table list in memory and persist to disk.
+    Store the compact text table list in memory and persist to disk.
 
     Call this immediately after a successful EntityDefinitions API fetch.
     """
@@ -321,7 +331,7 @@ def set_tables(data: list[dict]) -> None:
     }
     _dirty = True
     save_to_disk()
-    logger.debug("Tables list cached (%d tables)", len(data))
+    logger.debug("Tables list cached")
 
 
 def invalidate_tables() -> None:

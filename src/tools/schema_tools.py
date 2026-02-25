@@ -37,8 +37,6 @@ async def tool_whoami() -> Any:
         - Setting any field that expects the current user's systemuser GUID
     - FullName (str): Display name of the authenticated user (e.g. "John Doe").
       After successful sign-in, greet the user by their full name.
-    - BusinessUnitId (str): GUID of the user's business unit
-    - OrganizationId (str): GUID of the Dataverse organization
     - TimeZoneCode (int): The user's Dataverse timezone code (e.g. 110)
     - TimeZoneName (str): Windows timezone name (e.g. "Central Europe Standard Time").
       Use this to convert user-local times to UTC before sending DateTime values to Dataverse.
@@ -59,14 +57,19 @@ async def tool_whoami() -> Any:
 
 async def tool_list_tables() -> Any:
     """
-    Return a lightweight list of all tables (entities) in the Dataverse environment.
+    Return a compact pipe-delimited list of all tables (entities) in the Dataverse environment.
 
     Results are cached for 24 hours, so this call is very cheap after the first fetch.
-    Each entry contains:
+
+    Output format (pipe-delimited text):
+        LogicalName | DisplayName | EntitySetName
+        account | Account | accounts
+        contact | Contact | contacts
+        ...
+
     - LogicalName: the singular API name to pass to `Get_table_schema` (e.g. "account")
     - DisplayName: the human-readable label shown in the CRM UI (e.g. "Account")
     - EntitySetName: the plural collection name used in API URLs (e.g. "accounts")
-    - IsCustomEntity: whether this is a custom (non-system) table
 
     Call this tool when:
     - You need to find the correct LogicalName for a table the user mentions by display name
@@ -100,7 +103,7 @@ async def tool_get_schema(table_names: Optional[list[str]] = None) -> Any:
     Call this tool BEFORE creating or updating any record to ensure you use the correct:
     - Field LogicalNames (the API names, not display names — they differ and are case-sensitive)
     - Field types (determines how to format the value: string, int, DateTime, lookup, etc.)
-    - Required fields (RequiredLevel = "SystemRequired" or "ApplicationRequired" must be provided
+    - Required fields (Req = "Y" means SystemRequired or ApplicationRequired — must be provided
       when creating a record, or the API will return a 400 error)
     - PrimaryIdAttribute (the GUID field name you receive after creation and need for updates/deletes)
 
@@ -117,25 +120,32 @@ async def tool_get_schema(table_names: Optional[list[str]] = None) -> Any:
       LogicalName is the singular, lowercase API name — e.g. ["appointment", "contact", "account"].
       Always provide specific table names to get field-level details.
 
-    Returns a list of entity definitions, each containing:
-    - LogicalName: singular API name (e.g. "appointment")
-    - DisplayName: human-readable label shown in the UI
-    - PrimaryIdAttribute: GUID primary key field name (e.g. "activityid", "contactid")
-    - PrimaryNameAttribute: main display field name (e.g. "subject", "fullname")
-    - Attributes (only when specific tables are requested): list of fields, each with:
-        - LogicalName: field API name to use in data payloads, $select, and $filter
-        - DisplayName: human-readable label
-        - AttributeType: data type — format values accordingly:
-            String / Memo   → plain string
-            Integer         → whole number
-            Decimal / Money → decimal number
-            DateTime        → ISO 8601 UTC string e.g. "2024-06-15T14:30:00Z"
-            Boolean         → true / false
-            Picklist / Status / State → integer option value
-            Lookup          → OData bind: "fieldname@odata.bind": "/entityset(<GUID>)"
-        - RequiredLevel: "None" | "Recommended" | "ApplicationRequired" | "SystemRequired"
-          Fields with ApplicationRequired or SystemRequired MUST be included on create.
-        - Description: additional context about the field's purpose
+    Returns compact pipe-delimited text. Multiple tables are separated by "---".
+
+    Output format:
+        Table: account (Account)
+        Primary ID: accountid
+        Primary Name: name
+
+        Field | Display Name | Type | Req
+        name | Account Name | String | Y
+        revenue | Annual Revenue | Money |
+        primarycontactid | Primary Contact | Lookup |
+        description | Description | Memo | — Main business description
+
+    Columns:
+    - Field: LogicalName — use in data payloads, $select, and $filter
+    - Display Name: human-readable label
+    - Type: data type — format values accordingly:
+        String / Memo   → plain string
+        Integer         → whole number
+        Decimal / Money → decimal number
+        DateTime        → ISO 8601 UTC string e.g. "2024-06-15T14:30:00Z"
+        Boolean         → true / false
+        Picklist / Status / State → integer option value
+        Lookup          → OData bind: "fieldname@odata.bind": "/entityset(<GUID>)"
+    - Req: "Y" = required on create (SystemRequired or ApplicationRequired), empty = optional
+    - After " — ": optional description providing extra context about the field
     """
     try:
         return await dataverse.get_table_schema(table_names=table_names)

@@ -108,12 +108,22 @@ async def tool_create_record(table: str, data: dict) -> Any:
         "ownerid@odata.bind": "/systemusers(<GUID>)"
       The navigation property name and target entity set depend on the relationship —
       check schema or existing records for the correct format.
+    - PartyList fields (organizer, requiredattendees, optionalattendees, etc.):
+      These CANNOT be set as direct fields. Use the activity parties collection instead.
+      Add "{entitylogicalname}_activity_parties" array to the data payload:
+        "appointment_activity_parties": [
+          {"partyid_systemuser@odata.bind": "/systemusers(<GUID>)", "participationtypemask": 7},
+          {"partyid_contact@odata.bind": "/contacts(<GUID>)", "participationtypemask": 5}
+        ]
+      Participation type masks: 5 = Required Attendee, 6 = Optional Attendee, 7 = Organizer.
+      For email: 1 = Sender (from), 2 = To, 3 = CC, 4 = BCC.
 
-    Returns: The full created record including its primary ID field (e.g. activityid for appointments).
-    Save the ID from the response if you need to reference this record later.
+    Returns: The primary ID (GUID) of the created record (e.g. "a1b2c3d4-...").
+    Save this ID if you need to reference, update, or delete this record later.
     """
     try:
-        return await dataverse.create_record(table=table, data=data)
+        guid = await dataverse.create_record(table=table, data=data)
+        return f"Record created successfully in '{table}'. ID: {guid}"
     except AuthenticationRequiredError:
         return _auth_error_message("create_record")
     except Exception as e:

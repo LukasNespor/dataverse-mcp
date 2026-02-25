@@ -84,10 +84,14 @@ DATES AND TIMEZONES:
 
 APPOINTMENTS:
 - When creating an appointment, ask the user if they want it to sync to Outlook.
-- If yes, set the Organizer field to the current user:
-  "organizer@odata.bind": "/systemusers(<UserId>)"
-  (call `Get_my_identity` to get the UserId). This makes the appointment appear in the user's
-  Outlook calendar via server-side sync.
+- If yes, set the Organizer via activity parties (organizer is a PartyList field, not a Lookup):
+  "appointment_activity_parties": [
+    {"partyid_systemuser@odata.bind": "/systemusers(<UserId>)", "participationtypemask": 7}
+  ]
+  (call `Get_my_identity` to get the UserId). participationtypemask 7 = Organizer.
+  This makes the appointment appear in the user's Outlook calendar via server-side sync.
+- Use the same activity parties array for attendees:
+  participationtypemask 5 = Required Attendee, 6 = Optional Attendee.
 
 DELETION:
 - Always confirm with the user before deleting. Prefer deactivating (statecode=1) over deletion
