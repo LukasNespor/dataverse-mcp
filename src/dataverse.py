@@ -20,6 +20,25 @@ logger = logging.getLogger(__name__)
 # Maximum number of pages to follow when paginating list results
 MAX_PAGES = 20
 
+# System/internal attributes filtered from schema output to save tokens.
+# These are rarely useful for typical CRM operations.
+SYSTEM_ATTRIBUTES = {
+    # Row version / concurrency
+    "versionnumber",
+    # Data import metadata
+    "importsequencenumber", "overriddencreatedon",
+    # Timezone internals
+    "timezoneruleversionnumber", "utcconversiontimezonecode",
+    # Delegation metadata (who acted on behalf of whom)
+    "createdonbehalfby", "modifiedonbehalfby",
+    # Internal ownership decomposition (ownerid is sufficient)
+    "owningbusinessunit", "owningteam", "owninguser",
+    # Exchange/sync internals
+    "exchangerate",
+    # Yomi (Japanese phonetic) fields
+    "yominame", "yomifirstname", "yomilastname", "yomimiddlename", "yomifullname",
+}
+
 
 def _parse_dataverse_error(response: httpx.Response) -> str:
     """
@@ -114,9 +133,9 @@ async def whoami() -> dict:
 
     Returns:
       - UserId (str): GUID of the authenticated user — use for owner/assignee fields.
-      - BusinessUnitId (str): GUID of the user's business unit.
-      - OrganizationId (str): GUID of the Dataverse organization.
       - FullName (str): Display name of the authenticated user.
+      - TimeZoneCode (int): The user's Dataverse timezone code.
+      - TimeZoneName (str): Windows timezone name (e.g. "Central Europe Standard Time").
     """
     cached = cache.get_whoami()
     if cached is not None:
@@ -128,8 +147,6 @@ async def whoami() -> dict:
     user_id = result.get("UserId")
     data = {
         "UserId": user_id,
-        "BusinessUnitId": result.get("BusinessUnitId"),
-        "OrganizationId": result.get("OrganizationId"),
     }
 
     # Fetch the user's display name from systemusers
@@ -213,19 +230,33 @@ async def list_records(
     return all_records
 
 
-async def create_record(table: str, data: dict) -> dict:
+async def create_record(table: str, data: dict) -> str:
     """
     Create a new record in the specified Dataverse table.
 
-    Returns the full created record including its primary ID field.
-    Uses Prefer: return=representation to get the record back in one round-trip.
+    Returns the primary ID (GUID) of the created record, extracted from the
+    OData-EntityId response header. No Prefer: return=representation is used,
+    so Dataverse returns 204 No Content (saves tokens).
     """
-    return await _request(
-        "POST",
-        f"/{table}",
-        json=data,
-        extra_headers={"Prefer": "return=representation"},
-    )
+    headers = await _get_headers()
+    url = f"{settings.api_base}/{table}"
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(url, headers=headers, json=data)
+
+    if not response.is_success:
+        error_msg = _parse_dataverse_error(response)
+        logger.error("Dataverse API error POST %s: %s", url, error_msg)
+        raise httpx.HTTPStatusError(
+            error_msg,
+            request=response.request,
+            response=response,
+        )
+
+    # Extract GUID from OData-EntityId header: https://org.crm.dynamics.com/api/data/v9.2/accounts(guid)
+    entity_id = response.headers.get("OData-EntityId", "")
+    guid = entity_id.rsplit("(", 1)[-1].rstrip(")") if "(" in entity_id else ""
+    return guid
 
 
 async def update_record(table: str, record_id: str, data: dict) -> None:
@@ -247,24 +278,24 @@ async def delete_record(table: str, record_id: str) -> None:
     await _request("DELETE", f"/{table}({record_id})")
 
 
-async def list_tables() -> list[dict]:
+async def list_tables() -> str:
     """
-    Return a lightweight list of all Dataverse tables with basic identifiers.
+    Return a compact pipe-delimited list of all Dataverse tables.
 
-    Results are cached for 24 hours. Each entry contains LogicalName,
-    DisplayName, EntitySetName, and IsCustomEntity — enough to look up the
-    correct table name before calling get_table_schema() for field details.
+    Results are cached for 24 hours. Output contains LogicalName, DisplayName,
+    and EntitySetName — enough to look up the correct table name before calling
+    get_table_schema() for field details.
     """
     cached = cache.get_tables()
     if cached is not None:
-        logger.debug("Tables list served from cache (%d tables)", len(cached))
+        logger.debug("Tables list served from cache")
         return cached
 
     logger.debug("Tables list cache miss — fetching from API")
     result = await _request(
         "GET",
         "/EntityDefinitions",
-        params={"$select": "LogicalName,DisplayName,EntitySetName,IsCustomEntity"},
+        params={"$select": "LogicalName,DisplayName,EntitySetName"},
     )
 
     def label(obj) -> Optional[str]:
@@ -273,33 +304,25 @@ async def list_tables() -> list[dict]:
         lv = obj.get("LocalizedLabels", [])
         return lv[0].get("Label") if lv else (obj.get("UserLocalizedLabel") or {}).get("Label")
 
-    cleaned = [
-        {
-            "LogicalName": e.get("LogicalName"),
-            "DisplayName": label(e.get("DisplayName")),
-            "EntitySetName": e.get("EntitySetName"),
-            "IsCustomEntity": e.get("IsCustomEntity"),
-        }
-        for e in result.get("value", [])
-    ]
+    lines = ["LogicalName | DisplayName | EntitySetName"]
+    for e in result.get("value", []):
+        ln = e.get("LogicalName", "")
+        dn = label(e.get("DisplayName")) or ""
+        es = e.get("EntitySetName", "")
+        lines.append(f"{ln} | {dn} | {es}")
 
-    cache.set_tables(cleaned)
-    return cleaned
+    text = "\n".join(lines)
+    cache.set_tables(text)
+    return text
 
 
-async def get_table_schema(table_names: Optional[list[str]] = None) -> list[dict]:
+async def get_table_schema(table_names: Optional[list[str]] = None) -> str:
     """
     Retrieve entity definitions (schema) from Dataverse metadata.
 
-    When specific table names are provided, each table is checked against the
-    schema cache (TTL: 1 hour) before making an API call. Only tables not found
-    in cache (or with an expired cache entry) trigger an API request.
-
-    If table_names is None or empty, returns the list of all entity definitions
-    without attributes (no caching applied — this is a lightweight index query).
-
-    Each returned entity includes LogicalName, DisplayName, PrimaryIdAttribute,
-    PrimaryNameAttribute, and Attributes (when specific tables are requested).
+    Returns compact pipe-delimited text. When specific table names are provided,
+    each table is checked against the schema cache (TTL: 1 hour) before making
+    an API call. Multiple tables are separated by "---".
     """
     if table_names:
         results = []
@@ -331,7 +354,7 @@ async def get_table_schema(table_names: Optional[list[str]] = None) -> list[dict
             cache.set_schema(name, cleaned)
             results.append(cleaned)
 
-        return results
+        return "\n\n---\n\n".join(results)
     else:
         # Full table list — not cached (it's a cheap metadata-only query)
         result = await _request(
@@ -339,32 +362,42 @@ async def get_table_schema(table_names: Optional[list[str]] = None) -> list[dict
             "/EntityDefinitions",
             params={"$select": "LogicalName,DisplayName,PrimaryIdAttribute,PrimaryNameAttribute"},
         )
-        return [_clean_entity(e) for e in result.get("value", [])]
+        return "\n\n---\n\n".join(_clean_entity(e) for e in result.get("value", []))
 
 
-def _clean_entity(entity: dict) -> dict:
-    """Normalize entity metadata into a clean, consistent structure."""
+def _clean_entity(entity: dict) -> str:
+    """Format entity metadata as compact pipe-delimited text."""
     def label(obj) -> Optional[str]:
         if not obj:
             return None
         lv = obj.get("LocalizedLabels", [])
         return lv[0].get("Label") if lv else (obj.get("UserLocalizedLabel") or {}).get("Label")
 
-    def clean_attr(a: dict) -> dict:
-        return {
-            "LogicalName": a.get("LogicalName"),
-            "DisplayName": label(a.get("DisplayName")),
-            "AttributeType": a.get("AttributeType"),
-            "RequiredLevel": a.get("RequiredLevel", {}).get("Value"),
-            "Description": label(a.get("Description")),
-        }
+    name = entity.get("LogicalName", "")
+    display = label(entity.get("DisplayName")) or ""
+    pid = entity.get("PrimaryIdAttribute", "")
+    pname = entity.get("PrimaryNameAttribute", "")
 
-    cleaned = {
-        "LogicalName": entity.get("LogicalName"),
-        "DisplayName": label(entity.get("DisplayName")),
-        "PrimaryIdAttribute": entity.get("PrimaryIdAttribute"),
-        "PrimaryNameAttribute": entity.get("PrimaryNameAttribute"),
-    }
-    if "Attributes" in entity:
-        cleaned["Attributes"] = [clean_attr(a) for a in entity["Attributes"]]
-    return cleaned
+    lines = [
+        f"Table: {name} ({display})",
+        f"Primary ID: {pid}",
+        f"Primary Name: {pname}",
+        "",
+        "Field | Display Name | Type | Req",
+    ]
+
+    for a in entity.get("Attributes", []):
+        ln = a.get("LogicalName", "")
+        if ln in SYSTEM_ATTRIBUTES:
+            continue
+        display_name = label(a.get("DisplayName")) or ""
+        atype = a.get("AttributeType", "")
+        req_val = a.get("RequiredLevel", {}).get("Value", "")
+        req = "Y" if req_val in ("SystemRequired", "ApplicationRequired") else ""
+        desc = label(a.get("Description")) or ""
+        line = f"{ln} | {display_name} | {atype} | {req}"
+        if desc:
+            line += f" — {desc}"
+        lines.append(line)
+
+    return "\n".join(lines)
