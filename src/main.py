@@ -141,6 +141,24 @@ if settings.is_azure_mode:
             "offline_access",
         ],
     )
+
+    # Azure issues v1.0 tokens by default (accessTokenAcceptedVersion=null/1).
+    # v1.0 and v2.0 tokens differ in issuer and audience claims:
+    #   v1.0: iss=https://sts.windows.net/{tid}/         aud=api://{client_id}
+    #   v2.0: iss=https://login.microsoftonline.com/…/v2.0  aud={client_id}
+    # Patch the JWTVerifier to accept both formats so the server works
+    # regardless of the accessTokenAcceptedVersion manifest setting.
+    _tid = settings.tenant_id
+    _cid = settings.client_id
+    auth_provider._token_validator.issuer = [
+        f"https://login.microsoftonline.com/{_tid}/v2.0",
+        f"https://sts.windows.net/{_tid}/",
+    ]
+    auth_provider._token_validator.audience = [
+        _cid,
+        f"api://{_cid}",
+    ]
+
     mcp = FastMCP(
         name="Dataverse MCP Server",
         auth=auth_provider,

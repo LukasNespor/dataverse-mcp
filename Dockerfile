@@ -15,6 +15,9 @@ COPY --chown=mcpuser:mcpuser src/ ./src/
 # Create the token cache directory with correct ownership
 RUN mkdir -p /data && chown mcpuser:mcpuser /data
 
+# FastMCP OAuthProxy needs a writable directory for OAuth state storage
+RUN mkdir -p /app/.local/share/fastmcp && chown -R mcpuser:mcpuser /app/.local
+
 USER mcpuser
 
 # /data is a volume mount point for persistent token cache

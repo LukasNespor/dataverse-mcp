@@ -12,6 +12,10 @@ services:
       - TENANT_ID=${TENANT_ID:-common}
       # Required: Azure AD Application (client) ID from your Entra ID app registration
       - CLIENT_ID=${CLIENT_ID}
+      # Optional: Azure AD Application (client) secret from your Entra ID app registration
+      - CLIENT_SECRET=${CLIENT_SECRET:-}
+      # Azure OBO mode: public URL for OAuth redirect (only used when CLIENT_SECRET is set)
+      - MCP_BASE_URL=${MCP_BASE_URL:-http://localhost:8000}
       # Optional: fixed port for interactive auth redirect server (must match published port below)
       - AUTH_REDIRECT_PORT=${AUTH_REDIRECT_PORT:-5577}
       # Redis for shared proposal storage

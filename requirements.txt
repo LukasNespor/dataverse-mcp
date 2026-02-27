@@ -1,6 +1,7 @@
 fastmcp[azure]~=3.0.2
 msal~=1.35.0
 httpx~=0.28.1
+aiohttp~=3.11.0
 pydantic~=2.12.5
 pydantic-settings~=2.13.1
 redis~=7.2.1

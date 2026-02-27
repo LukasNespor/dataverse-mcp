@@ -2,8 +2,11 @@
 
 An MCP server that connects Claude to Microsoft Dataverse via the Dataverse Web API v9.2.
 Designed for everyday users who work with Dataverse records — not for admin operations like
-managing environments, solutions, or security roles. Authenticates via interactive browser
-sign-in (no client secrets required) with persistent token and schema caching.
+managing environments, solutions, or security roles.
+
+Supports two operation modes:
+- **Local mode** — single-user with interactive browser sign-in (no client secrets required)
+- **Azure mode** — multi-user with Entra ID On-Behalf-Of (OBO) flow for shared deployments
 
 Uses Redis for shared cache and proposal storage. Destructive operations (delete) use a
 two-step propose/confirm workflow with cryptographic confirmation tokens for safety.
@@ -12,19 +15,19 @@ two-step propose/confirm workflow with cryptographic confirmation tokens for saf
 
 ## Available Tools
 
-| Tool | Category | Cached | Description |
-|---|---|---|---|
-| `Sign in to Dataverse` | READ | — | Start interactive browser sign-in; returns a URL, token exchange happens automatically on redirect |
-| `Sign out from Dataverse` | READ | — | Sign out and clear cached identity; use to switch accounts |
-| `Get my identity` | READ | 24h TTL | Get the current user's GUID, display name, business unit, org ID, and timezone |
-| `List tables` | READ | 24h TTL | List all business tables with LogicalName, DisplayName, and EntitySetName |
-| `Get table schema` | READ | 1h TTL | Retrieve field definitions, types, and required fields per table |
-| `Refresh schema cache` | READ | — | Force a fresh schema fetch; use if schema seems stale after customizations |
-| `List records` | READ | — | Query records with OData $filter, $select, $orderby, and pagination |
-| `Create record` | CREATE | — | Create a new record (always call `Get table schema` first) |
-| `Update record` | UPDATE | — | Partially update an existing record via PATCH |
-| `Delete record` | DESTRUCTIVE | — | Propose permanent deletion — does NOT delete immediately |
-| `Confirm delete record` | DESTRUCTIVE | — | Execute a previously proposed deletion after user confirmation |
+| Tool | Category | Cached | Mode | Description |
+|---|---|---|---|---|
+| `Sign in to Dataverse` | READ | — | Local only | Start interactive browser sign-in; returns a URL, token exchange happens automatically on redirect |
+| `Sign out from Dataverse` | READ | — | Local only | Sign out and clear cached identity; use to switch accounts |
+| `Get my identity` | READ | 24h TTL | Both | Get the current user's GUID, display name, business unit, org ID, and timezone |
+| `List tables` | READ | 24h TTL | Both | List all business tables with LogicalName, DisplayName, and EntitySetName |
+| `Get table schema` | READ | 1h TTL | Both | Retrieve field definitions, types, and required fields per table |
+| `Refresh schema cache` | READ | — | Both | Force a fresh schema fetch; use if schema seems stale after customizations |
+| `List records` | READ | — | Both | Query records with OData $filter, $select, $orderby, and pagination |
+| `Create record` | CREATE | — | Both | Create a new record (always call `Get table schema` first) |
+| `Update record` | UPDATE | — | Both | Partially update an existing record via PATCH |
+| `Delete record` | DESTRUCTIVE | — | Both | Propose permanent deletion — does NOT delete immediately |
+| `Confirm delete record` | DESTRUCTIVE | — | Both | Execute a previously proposed deletion after user confirmation |
 
 > **Two-step delete:** `Delete record` creates a time-limited proposal with a one-time confirmation token. The agent must show the impact summary to the user, get explicit confirmation, then call `Confirm delete record` with the token. Proposals expire after 2 minutes and cannot be reused.
 
@@ -123,7 +126,7 @@ You will not need to sign in again until the refresh token expires (Microsoft de
 
 ---
 
-## Connecting to Claude Code
+## Connecting to Claude Code (Local mode)
 
 Claude Code uses a persistent MCP server process rather than spawning a new one per session.
 The server runs as a long-lived daemon and Claude Code connects to it over HTTP/SSE.
@@ -188,7 +191,59 @@ This writes to `.claude/config.json` in the current directory instead.
 
 ---
 
+## Azure OBO Mode
+
+Azure mode uses Entra ID On-Behalf-Of (OBO) flow for multi-user deployments. When `CLIENT_SECRET` is set, the server starts in Azure mode automatically — it uses HTTP transport with OAuth 2.1 authentication and exchanges each user's Entra ID token for a Dataverse access token via OBO.
+
+Sign-in and sign-out tools are disabled in this mode — users are pre-authenticated through the MCP client's OAuth flow.
+
+### Azure AD App Registration
+
+Configure your app registration in **Azure Portal → Microsoft Entra ID → App registrations**:
+
+1. **Authentication** → Add platform → **Web** → Redirect URI: `http://localhost:8000/auth/callback` (local) or `https://your-app.azurewebsites.net/auth/callback` (production)
+2. **Expose an API** → Set Application ID URI (accept the default `api://<CLIENT_ID>`)
+3. **Expose an API** → Add a scope → Name: `mcp-access`, Who can consent: Admins and users
+4. **API permissions** → Add → **Dynamics CRM** → `user_impersonation` (delegated) → Grant admin consent
+5. **Certificates & secrets** → New client secret → Copy the value to `.env` as `CLIENT_SECRET`
+
+### .env for Azure mode
+
+```env
+DATAVERSE_URL=https://yourorg.crm4.dynamics.com
+TENANT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx   # must be the GUID, not a domain name
+CLIENT_ID=your-client-id
+CLIENT_SECRET=your-client-secret
+MCP_BASE_URL=http://localhost:8000                # or https://your-app.azurewebsites.net
+```
+
+> **Important:** `TENANT_ID` must be the tenant GUID (e.g. `bb05be88-...`), not a domain name (e.g. `contoso.com`). Azure endpoints accept both forms, but the JWT `iss` claim always uses the GUID — a domain name causes issuer mismatch during token validation.
+
+### Local testing
+
+To test Azure OBO mode locally before deploying, use the `docker-compose.azure.yml` override which exposes port 8000:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.azure.yml up -d --build
+```
+
+Then add it to Claude Code:
+
+```bash
+claude mcp add Dataverse --transport http http://localhost:8000/mcp
+```
+
+When Claude Code connects, the server redirects you to Entra ID sign-in. After authentication, the OBO exchange happens automatically and all Dataverse calls use the per-user token.
+
+### Production deployment
+
+For Azure deployment (e.g. Azure Container Apps, App Service), set `MCP_BASE_URL` to the public URL of the server and configure the redirect URI in the app registration accordingly. The server listens on port 8000 with `stateless_http=True`, so it can run behind a load balancer with multiple replicas sharing the same Redis instance.
+
+---
+
 ## Architecture
+
+### Local mode (single-user)
 
 ```
 ┌─────────────┐     stdio/SSE      ┌──────────────────┐     OData v9.2     ┌────────────┐
@@ -205,9 +260,32 @@ This writes to `.claude/config.json` in the current directory instead.
                                    └──────────────┘
 ```
 
-- **Cache** (Redis): WhoAmI identity (24h TTL), table schema (1h TTL), table list (24h TTL). Shared across replicas in Azure mode.
+### Azure mode (multi-user, OBO)
+
+```
+┌─────────────┐       HTTP        ┌──────────────────┐      OBO        ┌────────────┐
+│ Claude Code  │ ◄───────────────► │  MCP Server      │ ◄─────────────► │ Entra ID   │
+│ (MCP client) │   (OAuth 2.1)    │  (FastMCP +      │  token exchange │            │
+└─────────────┘                   │   AzureProvider) │                 └────────────┘
+                                  └──────┬───────────┘
+                                         │                               ┌────────────┐
+                                         ├── OData v9.2 ────────────────►│ Dataverse  │
+                                         │   (per-user OBO token)        │ Web API    │
+                                         │                               └────────────┘
+                                         │ Redis protocol
+                                         ▼
+                                  ┌──────────────┐
+                                  │    Redis      │
+                                  │  (cache +     │
+                                  │  proposals)   │
+                                  └──────────────┘
+```
+
+In Azure mode, the server acts as a confidential client. The MCP client authenticates the user via Entra ID OAuth, and the server exchanges the user's token for a Dataverse access token using the On-Behalf-Of (OBO) flow. Each user gets their own Dataverse token — the server never shares tokens across users. Cache keys for identity data are scoped per user via the `oid` claim from the JWT.
+
+- **Cache** (Redis): WhoAmI identity (24h TTL), table schema (1h TTL), table list (24h TTL). Per-user identity cache in Azure mode, shared schema cache across all users.
 - **Proposals** (Redis): Two-step delete proposals with cryptographic tokens, automatic TTL expiry, and atomic replay protection via Lua CAS script.
-- **Audit**: Structured JSON audit logging on every tool invocation. Destructive actions log proposal creation and confirmation separately.
+- **Audit**: Structured JSON audit logging on every tool invocation. Destructive actions log proposal creation and confirmation separately with user context from the OBO token.
 - **Input validation**: Table names and record GUIDs are validated before any API call.
 
 ---
@@ -286,10 +364,11 @@ Claude calls `Refresh schema cache` for the `appointment` table, then re-fetches
 - Confirmation tokens are SHA-256 hashed — plaintext is never stored
 - Atomic replay protection via Redis Lua CAS script prevents double-execution
 - Input validation on all table names and record GUIDs (prevents injection)
-- Structured audit logging on every tool invocation
-- MSAL cache files are written with `chmod 600` (owner read/write only)
+- Structured audit logging on every tool invocation with user context
+- MSAL cache files (local mode) are written with `chmod 600` (owner read/write only)
 - The container runs as a non-root user (`mcpuser`)
-- No client secrets are stored anywhere — interactive flow uses only public client credentials
+- In Azure mode, the client secret is passed only via environment variable — never stored in code or logs
+- Per-user OBO tokens ensure users can only access Dataverse data they are authorized for
 - Never commit `.env` to git — it is listed in `.gitignore` by default in this repo
 
 ---
@@ -300,11 +379,25 @@ Register an app in Azure Portal for your Dataverse MCP Server:
 
 1. Go to **Azure Portal → Microsoft Entra ID → App registrations → New registration**
 2. Name it anything (e.g. "Dataverse MCP Server")
-3. Under **Authentication**, add platform **Mobile and desktop applications**
-4. Add redirect URI: `http://localhost:5577` (or your custom `AUTH_REDIRECT_PORT`)
-5. Under **API permissions**, add **Dynamics CRM → user_impersonation** (delegated)
-6. Copy the **Application (client) ID** into your `.env` as `CLIENT_ID`
-7. Set `TENANT_ID` to your specific tenant ID for tighter security (avoids `common`)
+3. Under **API permissions**, add **Dynamics CRM → user_impersonation** (delegated)
+4. Copy the **Application (client) ID** into your `.env` as `CLIENT_ID`
+5. Set `TENANT_ID` to your specific tenant ID for tighter security (avoids `common`)
+
+### Local mode (interactive auth)
+
+6. Under **Authentication**, add platform **Mobile and desktop applications**
+7. Add redirect URI: `http://localhost:5577` (or your custom `AUTH_REDIRECT_PORT`)
+
+No client secret is needed — local mode uses public client credentials only.
+
+### Azure mode (OBO)
+
+6. Under **Authentication**, add platform **Web**
+7. Add redirect URI: `http://localhost:8000/auth/callback` (local testing) or `https://your-app.azurewebsites.net/auth/callback` (production)
+8. Under **Expose an API**, set the Application ID URI (accept the default `api://<CLIENT_ID>`)
+9. Under **Expose an API**, add a scope named `mcp-access` (allow admin and user consent)
+10. Under **Certificates & secrets**, create a new client secret and copy it to `.env` as `CLIENT_SECRET`
+11. Grant admin consent for the Dynamics CRM permission
 
 ---
 
@@ -325,7 +418,7 @@ Tests use `fakeredis` — no running Redis instance required.
 (after 90 days of inactivity). Sign in again when prompted.
 
 **Claude Code: `claude mcp list` shows server as disconnected** — The Docker containers are
-not running. Run `docker compose -f docker-compose.yml -f docker-compose.sse.yml up -d` before starting Claude Code.
+not running. Run `docker compose -f docker-compose.yml -f docker-compose.sse.yml up -d` (local mode) or `docker compose -f docker-compose.yml -f docker-compose.azure.yml up -d` (Azure mode) before starting Claude Code.
 
 **"attribute does not exist" errors when creating records** — The schema cache may be serving
 stale data. Ask Claude to call `Refresh schema cache` for the affected table, then retry.
@@ -336,3 +429,9 @@ and update the `claude mcp add` URL accordingly.
 **Port 5577 refused during sign-in (macOS)** — On macOS, `docker compose run` does not publish container ports by default. Add `"--service-ports"` to the `args` array in your `claude_desktop_config.json` (as shown in the configuration example above). If port 5577 is already allocated from a previous failed attempt, run `docker compose down` and remove stale containers before retrying.
 
 **Redis connection error on startup** — The MCP server requires Redis. Ensure you're using `docker compose` (which starts both services) rather than running the container directly. Check `docker compose ps` to verify the Redis container is healthy.
+
+**Azure OBO: "Redirect URI not registered"** — The redirect URI in your Entra ID app registration must exactly match `{MCP_BASE_URL}/auth/callback`. For local testing this is `http://localhost:8000/auth/callback`. Make sure you added it under the **Web** platform (not Mobile/Desktop).
+
+**Azure OBO: "AADSTS65001" or consent errors** — Admin consent has not been granted for the Dynamics CRM `user_impersonation` permission. Go to Azure Portal → App registrations → API permissions → Grant admin consent.
+
+**Azure OBO: "accessTokenAcceptedVersion" errors** — The server accepts both v1.0 and v2.0 Azure tokens automatically. If you still see token version issues, verify the app registration's "Expose an API" section has the Application ID URI set.

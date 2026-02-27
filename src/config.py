@@ -34,6 +34,14 @@ class Settings(BaseSettings):
     def strip_trailing_slash(cls, v: str) -> str:
         return v.rstrip("/")
 
+    @field_validator("client_secret", mode="before")
+    @classmethod
+    def empty_str_to_none(cls, v: Optional[str]) -> Optional[str]:
+        """Treat empty/whitespace-only CLIENT_SECRET as unset (local mode)."""
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
     @property
     def is_azure_mode(self) -> bool:
         """True when running in Azure OBO mode (client_secret is set)."""
