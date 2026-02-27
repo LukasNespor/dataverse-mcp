@@ -12,8 +12,11 @@ from typing import Any, Optional
 import httpx
 
 import cache
-from auth import get_token, AuthenticationRequiredError
+from auth import AuthenticationRequiredError
 from config import settings
+
+# Re-export so tools can import from dataverse
+__all__ = ["AuthenticationRequiredError"]
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +42,65 @@ SYSTEM_ATTRIBUTES = {
     "yominame", "yomifirstname", "yomilastname", "yomimiddlename", "yomifullname",
 }
 
+# Prefixes of internal/platform tables excluded from List_tables output.
+# Users can still query these tables directly via List_records if needed.
+_SYSTEM_TABLE_PREFIXES = (
+    "msdyn_",       # Dynamics 365 internal modules
+    "msdynmkt_",    # Dynamics 365 Marketing
+    "mspp_",        # Power Pages
+    "adx_",         # Portal
+    "msfp_",        # Forms Pro / Customer Voice
+    "mspcat_",      # Catalog
+    "flow",         # flowsession, flowrun, flowmachine, flowlog, …
+    "workflow",     # workflow, workflowbinary
+    "sdk",          # sdkmessage, sdkmessageprocessingstep, …
+    "plugin",       # plugintype, pluginpackage, …
+    "import",       # importlog, importdata, importfile, …
+    "bulkdelete",
+    "asyncoperation",
+    "solution",     # solutioncomponent, solutioncomponentdatasource, …
+    "dependency",
+    "ribbon",       # ribboncustomization, ribbonrule, …
+    "postfollow",
+    "postcomment",
+    "postrule",
+    "tracelog",
+    "retent",       # retentionconfig, retentionoperation, …
+    "powerbi",      # powerbidataset, powerbireport, …
+    "powerpage",    # powerpagecomponent, powerpagesite, …
+    "powerfx",      # powerfxrule
+    "canvas",       # canvasapp
+    "synapse",
+    "searchtelemetry",
+    "desktopflow",  # desktopflowbinary, desktopflowmodule
+    "componentversion",
+    "entityanalyticsconfig",
+    "entityimageconfig",
+    "entityindex",
+    "virtualentitymetadata",
+    "privilegechecker",
+    "organizationdatasync",
+    "recyclebinconfig",
+    "callbackregistration",
+    "serviceendpoint",
+    "tdsmetadata",
+    "workqueue",
+    "fabricai",
+    "featurecontrolsetting",
+    "settingdefinition",
+    "userentityinstancedata",
+    "userentityuisettings",
+    "subscriptionmanuallytrackedobject",
+    "principalobjectattributeaccess",
+    "fieldsecurityprofile",
+    "fieldpermission",
+)
+
+
+def _is_system_table(logical_name: str) -> bool:
+    """Return True if the table is a known system/platform table."""
+    return logical_name.startswith(_SYSTEM_TABLE_PREFIXES)
+
 
 def _parse_dataverse_error(response: httpx.Response) -> str:
     """
@@ -55,9 +117,8 @@ def _parse_dataverse_error(response: httpx.Response) -> str:
         return f"HTTP {response.status_code}: {response.text[:500]}"
 
 
-async def _get_headers() -> dict[str, str]:
-    """Build authorization headers with a fresh access token."""
-    token = await get_token()
+def _get_headers(token: str) -> dict[str, str]:
+    """Build authorization headers with the provided access token."""
     return {
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
@@ -72,6 +133,7 @@ async def _request(
     method: str,
     path: str,
     *,
+    token: str,
     params: Optional[dict] = None,
     json: Optional[dict] = None,
     extra_headers: Optional[dict] = None,
@@ -80,11 +142,10 @@ async def _request(
     Execute an authenticated HTTP request against the Dataverse Web API.
 
     Raises:
-        AuthenticationRequiredError: if no valid token exists.
         httpx.HTTPStatusError: on 4xx/5xx responses (with Dataverse error message).
         httpx.RequestError: on network-level failures.
     """
-    headers = await _get_headers()
+    headers = _get_headers(token)
     if extra_headers:
         # Merge Prefer values instead of overwriting
         if "Prefer" in extra_headers and "Prefer" in headers:
@@ -123,13 +184,18 @@ async def _request(
 # ---------------------------------------------------------------------------
 
 
-async def whoami() -> dict:
+async def whoami(token: str, user_oid: Optional[str] = None) -> dict:
     """
     Return the identity of the currently authenticated Dataverse user.
 
-    Results are cached for 24 hours. The cache is invalidated automatically when
-    the user re-authenticates. API is only called on first use, after cache
-    expiry, or after explicit invalidation.
+    Results are cached for 24 hours per user_oid. The cache is invalidated
+    automatically when the user re-authenticates. API is only called on first
+    use, after cache expiry, or after explicit invalidation.
+
+    Args:
+        token: Bearer access token for Dataverse.
+        user_oid: Entra ID object ID of the user (for per-user cache keying).
+                  If None, uses a global cache key (local/single-user mode).
 
     Returns:
       - UserId (str): GUID of the authenticated user — use for owner/assignee fields.
@@ -137,13 +203,13 @@ async def whoami() -> dict:
       - TimeZoneCode (int): The user's Dataverse timezone code.
       - TimeZoneName (str): Windows timezone name (e.g. "Central Europe Standard Time").
     """
-    cached = cache.get_whoami()
+    cached = cache.get_whoami(user_oid)
     if cached is not None:
         logger.debug("WhoAmI served from cache (UserId=%s)", cached.get("UserId"))
         return cached
 
     logger.debug("WhoAmI cache miss — fetching from API")
-    result = await _request("GET", "/WhoAmI")
+    result = await _request("GET", "/WhoAmI", token=token)
     user_id = result.get("UserId")
     data = {
         "UserId": user_id,
@@ -155,6 +221,7 @@ async def whoami() -> dict:
             user = await _request(
                 "GET",
                 f"/systemusers({user_id})",
+                token=token,
                 params={"$select": "fullname"},
             )
             data["FullName"] = user.get("fullname")
@@ -166,6 +233,7 @@ async def whoami() -> dict:
             tz_settings = await _request(
                 "GET",
                 f"/usersettingscollection({user_id})",
+                token=token,
                 params={"$select": "timezonecode"},
             )
             tz_code = tz_settings.get("timezonecode")
@@ -174,6 +242,7 @@ async def whoami() -> dict:
                 tz_defs = await _request(
                     "GET",
                     "/timezonedefinitions",
+                    token=token,
                     params={
                         "$filter": f"timezonecode eq {tz_code}",
                         "$select": "standardname,userinterfacename",
@@ -185,12 +254,13 @@ async def whoami() -> dict:
         except Exception as e:
             logger.warning("Failed to fetch user timezone: %s", e)
 
-    cache.set_whoami(data)
+    cache.set_whoami(user_oid, data)
     return data
 
 
 async def list_records(
     table: str,
+    token: str,
     filter_expr: Optional[str] = None,
     select: Optional[str] = None,
     top: int = 50,
@@ -216,7 +286,7 @@ async def list_records(
     pages = 0
 
     while path and pages < MAX_PAGES:
-        result = await _request("GET", path, params=params if pages == 0 else None)
+        result = await _request("GET", path, token=token, params=params if pages == 0 else None)
         records = result.get("value", [])
         all_records.extend(records)
         pages += 1
@@ -230,7 +300,7 @@ async def list_records(
     return all_records
 
 
-async def create_record(table: str, data: dict) -> str:
+async def create_record(table: str, data: dict, token: str) -> str:
     """
     Create a new record in the specified Dataverse table.
 
@@ -238,7 +308,7 @@ async def create_record(table: str, data: dict) -> str:
     OData-EntityId response header. No Prefer: return=representation is used,
     so Dataverse returns 204 No Content (saves tokens).
     """
-    headers = await _get_headers()
+    headers = _get_headers(token)
     url = f"{settings.api_base}/{table}"
 
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -259,26 +329,26 @@ async def create_record(table: str, data: dict) -> str:
     return guid
 
 
-async def update_record(table: str, record_id: str, data: dict) -> None:
+async def update_record(table: str, record_id: str, data: dict, token: str) -> None:
     """
     Update an existing record using PATCH (partial update — only provided fields are changed).
 
     record_id must be the GUID value of the record's primary key (without braces).
     """
-    await _request("PATCH", f"/{table}({record_id})", json=data)
+    await _request("PATCH", f"/{table}({record_id})", token=token, json=data)
 
 
-async def delete_record(table: str, record_id: str) -> None:
+async def delete_record(table: str, record_id: str, token: str) -> None:
     """
     Permanently delete a record from Dataverse.
 
     record_id must be the GUID value of the record's primary key (without braces).
     This action is irreversible.
     """
-    await _request("DELETE", f"/{table}({record_id})")
+    await _request("DELETE", f"/{table}({record_id})", token=token)
 
 
-async def list_tables() -> str:
+async def list_tables(token: str) -> str:
     """
     Return a compact pipe-delimited list of all Dataverse tables.
 
@@ -295,7 +365,11 @@ async def list_tables() -> str:
     result = await _request(
         "GET",
         "/EntityDefinitions",
-        params={"$select": "LogicalName,DisplayName,EntitySetName"},
+        token=token,
+        params={
+            "$select": "LogicalName,DisplayName,EntitySetName",
+            "$filter": "IsIntersect eq false and IsPrivate eq false",
+        },
     )
 
     def label(obj) -> Optional[str]:
@@ -309,6 +383,8 @@ async def list_tables() -> str:
         ln = e.get("LogicalName", "")
         dn = label(e.get("DisplayName")) or ""
         es = e.get("EntitySetName", "")
+        if not dn or _is_system_table(ln):
+            continue
         lines.append(f"{ln} | {dn} | {es}")
 
     text = "\n".join(lines)
@@ -316,7 +392,7 @@ async def list_tables() -> str:
     return text
 
 
-async def get_table_schema(table_names: Optional[list[str]] = None) -> str:
+async def get_table_schema(token: str, table_names: Optional[list[str]] = None) -> str:
     """
     Retrieve entity definitions (schema) from Dataverse metadata.
 
@@ -339,11 +415,13 @@ async def get_table_schema(table_names: Optional[list[str]] = None) -> str:
             entity = await _request(
                 "GET",
                 f"/EntityDefinitions(LogicalName='{name}')",
+                token=token,
                 params={"$select": "LogicalName,DisplayName,PrimaryIdAttribute,PrimaryNameAttribute"},
             )
             attrs_result = await _request(
                 "GET",
                 f"/EntityDefinitions(LogicalName='{name}')/Attributes",
+                token=token,
                 params={
                     "$select": "LogicalName,DisplayName,AttributeType,RequiredLevel,Description",
                     "$filter": "AttributeType ne 'Virtual'",
@@ -360,6 +438,7 @@ async def get_table_schema(table_names: Optional[list[str]] = None) -> str:
         result = await _request(
             "GET",
             "/EntityDefinitions",
+            token=token,
             params={"$select": "LogicalName,DisplayName,PrimaryIdAttribute,PrimaryNameAttribute"},
         )
         return "\n\n---\n\n".join(_clean_entity(e) for e in result.get("value", []))

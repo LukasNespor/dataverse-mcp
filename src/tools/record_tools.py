@@ -17,8 +17,14 @@ IMPORTANT GUIDANCE FOR THE AGENT:
 import logging
 from typing import Any, Optional
 
+import hashlib
+
 import dataverse
-from auth import AuthenticationRequiredError
+import confirmations
+import audit
+from config import settings
+from token_resolver import resolve_token, OBO_TOKEN_DEFAULT
+from validation import validate_guid, validate_table_name
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +36,7 @@ def _auth_error_message(tool_name: str) -> str:
     )
 
 
+@audit.audited_tool("List_records", "READ")
 async def tool_list_records(
     table: str,
     filter: Optional[str] = None,
@@ -37,6 +44,7 @@ async def tool_list_records(
     top: int = 50,
     orderby: Optional[str] = None,
     fetch_all_pages: bool = False,
+    _obo_token: Optional[str] = OBO_TOKEN_DEFAULT,
 ) -> Any:
     """
     Query and return records from a Dataverse (CRM) table using OData query options.
@@ -65,22 +73,29 @@ async def tool_list_records(
     the primary ID field. Returns an empty list if no records match.
     """
     try:
+        token = await resolve_token(_obo_token)
         return await dataverse.list_records(
             table=table,
+            token=token,
             filter_expr=filter,
             select=select,
             top=top,
             orderby=orderby,
             fetch_all_pages=fetch_all_pages,
         )
-    except AuthenticationRequiredError:
+    except dataverse.AuthenticationRequiredError:
         return _auth_error_message("list_records")
     except Exception as e:
         logger.exception("list_records failed for table %s", table)
         return f"Failed to list records from '{table}': {e}"
 
 
-async def tool_create_record(table: str, data: dict) -> Any:
+@audit.audited_tool("Create_record", "CREATE")
+async def tool_create_record(
+    table: str,
+    data: dict,
+    _obo_token: Optional[str] = OBO_TOKEN_DEFAULT,
+) -> Any:
     """
     Create a new record in a Dataverse (CRM) table.
 
@@ -122,16 +137,28 @@ async def tool_create_record(table: str, data: dict) -> Any:
     Save this ID if you need to reference, update, or delete this record later.
     """
     try:
-        guid = await dataverse.create_record(table=table, data=data)
+        validate_table_name(table)
+    except ValueError as e:
+        return f"Validation error: {e}"
+
+    try:
+        token = await resolve_token(_obo_token)
+        guid = await dataverse.create_record(table=table, data=data, token=token)
         return f"Record created successfully in '{table}'. ID: {guid}"
-    except AuthenticationRequiredError:
+    except dataverse.AuthenticationRequiredError:
         return _auth_error_message("create_record")
     except Exception as e:
         logger.exception("create_record failed for table %s", table)
         return f"Failed to create record in '{table}': {e}"
 
 
-async def tool_update_record(table: str, record_id: str, data: dict) -> Any:
+@audit.audited_tool("Update_record", "UPDATE")
+async def tool_update_record(
+    table: str,
+    record_id: str,
+    data: dict,
+    _obo_token: Optional[str] = OBO_TOKEN_DEFAULT,
+) -> Any:
     """
     Update specific fields on an existing Dataverse (CRM) record using a partial PATCH update.
 
@@ -156,18 +183,34 @@ async def tool_update_record(table: str, record_id: str, data: dict) -> Any:
     If the record does not exist or you lack permission, an error is returned.
     """
     try:
-        await dataverse.update_record(table=table, record_id=record_id, data=data)
+        validate_table_name(table)
+        validate_guid(record_id)
+    except ValueError as e:
+        return f"Validation error: {e}"
+
+    try:
+        token = await resolve_token(_obo_token)
+        await dataverse.update_record(table=table, record_id=record_id, data=data, token=token)
         return f"Record {record_id} in '{table}' updated successfully."
-    except AuthenticationRequiredError:
+    except dataverse.AuthenticationRequiredError:
         return _auth_error_message("update_record")
     except Exception as e:
         logger.exception("update_record failed for table %s record %s", table, record_id)
         return f"Failed to update record {record_id} in '{table}': {e}"
 
 
-async def tool_delete_record(table: str, record_id: str) -> Any:
+@audit.audited_tool("Delete_record", "DESTRUCTIVE")
+async def tool_delete_record(
+    table: str,
+    record_id: str,
+    _obo_token: Optional[str] = OBO_TOKEN_DEFAULT,
+) -> Any:
     """
-    Permanently delete a record from a Dataverse (CRM) table. This action cannot be undone.
+    Propose deletion of a record from a Dataverse (CRM) table.
+
+    This tool does NOT delete the record immediately. It creates a time-limited
+    proposal that must be confirmed by calling `Confirm_delete_record` with the
+    returned proposalId, confirmToken, and confirmPhrase.
 
     Before calling this tool:
     1. Confirm the user explicitly wants to delete — do not delete based on ambiguous intent.
@@ -181,14 +224,139 @@ async def tool_delete_record(table: str, record_id: str) -> Any:
     - record_id (required): GUID of the record to delete, without braces.
       Format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 
-    Returns: A success confirmation message. If the record does not exist or you lack
-    delete privileges, an error is returned with details.
+    Returns: A proposal containing proposalId, confirmToken, and confirmPhrase.
+    Pass these to `Confirm_delete_record` to execute the deletion.
     """
     try:
-        await dataverse.delete_record(table=table, record_id=record_id)
-        return f"Record {record_id} in '{table}' deleted successfully."
-    except AuthenticationRequiredError:
+        validate_table_name(table)
+        validate_guid(record_id)
+    except ValueError as e:
+        return f"Validation error: {e}"
+
+    try:
+        # Verify auth works before creating a proposal
+        await resolve_token(_obo_token)
+    except dataverse.AuthenticationRequiredError:
         return _auth_error_message("delete_record")
     except Exception as e:
-        logger.exception("delete_record failed for table %s record %s", table, record_id)
-        return f"Failed to delete record {record_id} in '{table}': {e}"
+        logger.exception("delete_record auth check failed")
+        return f"Failed to verify authentication: {e}"
+
+    user_id, user_name = audit.get_user_context(_obo_token)
+
+    proposal_id, confirm_token, confirm_phrase = confirmations.create_proposal(
+        table=table,
+        record_id=record_id,
+    )
+
+    impact = (
+        f"Will permanently delete record `{record_id}` from `{table}`. "
+        "This is irreversible."
+    )
+
+    # Audit the proposal (log token fingerprint, never plaintext)
+    token_fingerprint = hashlib.sha256(confirm_token.encode()).hexdigest()[:8]
+    audit.log_proposal(
+        proposal_id=proposal_id,
+        impact_summary=impact,
+        ttl=settings.confirm_token_ttl_seconds,
+        token_fingerprint=token_fingerprint,
+        user_id=user_id,
+        user_name=user_name,
+    )
+
+    return (
+        f"**Delete proposal created**\n\n"
+        f"{impact}\n\n"
+        f"- **proposalId**: `{proposal_id}`\n"
+        f"- **confirmToken**: `{confirm_token}`\n"
+        f"- **confirmPhrase**: `{confirm_phrase}`\n\n"
+        f"To execute, call `Confirm_delete_record` with these values. "
+        f"The proposal expires in {settings.confirm_token_ttl_seconds} seconds."
+    )
+
+
+@audit.audited_tool("Confirm_delete_record", "DESTRUCTIVE")
+async def tool_confirm_delete_record(
+    proposal_id: str,
+    confirm_token: str,
+    confirm_phrase: str,
+    _obo_token: Optional[str] = OBO_TOKEN_DEFAULT,
+) -> Any:
+    """
+    Execute a previously proposed record deletion.
+
+    This is the second step of the two-step delete workflow. You must first call
+    `Delete_record` to create a proposal, then call this tool with the values
+    it returned.
+
+    Parameters:
+    - proposal_id (required): The proposal ID returned by `Delete_record`.
+    - confirm_token (required): The one-time confirmation token returned by `Delete_record`.
+    - confirm_phrase (required): The confirmation phrase returned by `Delete_record`
+      (must match exactly).
+
+    Returns: A success message if the record was deleted, or an error explaining
+    why the confirmation failed (expired, already used, wrong token/phrase, etc.).
+    """
+    user_id, user_name = audit.get_user_context(_obo_token)
+
+    try:
+        proposal = confirmations.validate_and_consume(
+            proposal_id=proposal_id,
+            confirm_token=confirm_token,
+            confirm_phrase=confirm_phrase,
+        )
+    except confirmations.ConfirmationError as e:
+        audit.log_confirm(
+            proposal_id=proposal_id,
+            success=False,
+            reason=str(e),
+            user_id=user_id,
+            user_name=user_name,
+        )
+        return f"Confirmation failed: {e}"
+
+    try:
+        token = await resolve_token(_obo_token)
+        await dataverse.delete_record(
+            table=proposal.table,
+            record_id=proposal.record_id,
+            token=token,
+        )
+    except dataverse.AuthenticationRequiredError:
+        audit.log_confirm(
+            proposal_id=proposal_id,
+            success=False,
+            reason="authentication_required",
+            user_id=user_id,
+            user_name=user_name,
+        )
+        return _auth_error_message("confirm_delete_record")
+    except Exception as e:
+        logger.exception(
+            "confirm_delete_record failed for proposal %s", proposal_id,
+        )
+        audit.log_confirm(
+            proposal_id=proposal_id,
+            success=False,
+            reason=str(e),
+            user_id=user_id,
+            user_name=user_name,
+        )
+        return (
+            f"Delete confirmed but execution failed for record "
+            f"{proposal.record_id} in '{proposal.table}': {e}"
+        )
+
+    audit.log_confirm(
+        proposal_id=proposal_id,
+        success=True,
+        user_id=user_id,
+        user_name=user_name,
+    )
+
+    return (
+        f"Record `{proposal.record_id}` in `{proposal.table}` "
+        f"deleted successfully."
+    )

@@ -20,53 +20,26 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
     "Dataverse": {
       "command": "docker",
       "args": [
-        "run", "--rm", "-i",
-        "-e", "DATAVERSE_URL=https://yourorg.crm4.dynamics.com",
-        "-e", "CLIENT_ID=your-azure-app-client-id",
-        "-e", "TENANT_ID=your-azure-tenant-id",
-        "-v", "dataverse-data:/data",
-        "-p", "5577:5577",
-        "112567/dataverse-mcp"
+        "compose",
+        "-f", "/absolute/path/to/dataverse-mcp/docker-compose.yml",
+        "run", "--rm", "-i", "--service-ports",
+        "dataverse-mcp"
       ]
     }
   }
 }
 ```
 
-> **Important:** If your config file already exists and contains other MCP servers, do not replace the entire file. Add the `"Dataverse": { ... }` entry inside the existing `"mcpServers"` object.
+> **Important:** Replace the path with the absolute path to your cloned repo. If your config file already exists and contains other MCP servers, add the `"Dataverse": { ... }` entry inside the existing `"mcpServers"` object.
 
-Replace placeholder values. Restart Claude Desktop. The container starts automatically when Claude Desktop launches and is removed when the app closes.
+Fill in your values in `.env` (copy from `.env.example`). Restart Claude Desktop. The container (including Redis) starts automatically when Claude Desktop launches.
 
 ### Claude Code
 
-Create a `docker-compose.yml` — fill in your values and it's ready to go:
-
-```yaml
-services:
-  dataverse-mcp:
-    image: 112567/dataverse-mcp
-    container_name: dataverse-mcp
-    environment:
-      - DATAVERSE_URL=https://yourorg.crm4.dynamics.com
-      - CLIENT_ID=your-azure-app-client-id
-      - TENANT_ID=your-azure-tenant-id
-      - MCP_TRANSPORT=sse
-      - MCP_HOST=0.0.0.0
-    ports:
-      - "5577:5577"
-      - "8199:8000"
-    volumes:
-      - dataverse-data:/data
-    restart: unless-stopped
-
-volumes:
-  dataverse-data:
-```
-
-Start the server:
+Start the server with the SSE transport override:
 
 ```bash
-docker compose up -d
+docker compose -f docker-compose.yml -f docker-compose.sse.yml up -d
 ```
 
 Register the server in Claude Code:
@@ -75,7 +48,7 @@ Register the server in Claude Code:
 claude mcp add Dataverse --transport sse http://localhost:8199/sse
 ```
 
-> **Important:** The container must be running before you start Claude Code. If you start Claude Code first, it will fail to connect to the MCP server and you will need to restart Claude Code.
+> **Important:** The containers must be running before you start Claude Code. If you start Claude Code first, it will fail to connect and you will need to restart Claude Code.
 
 ## 2. Sign in
 

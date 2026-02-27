@@ -9,6 +9,7 @@ user confirms they have signed in.
 
 import logging
 
+import audit
 import cache
 from auth import (
     AuthenticationRequiredError,
@@ -20,6 +21,7 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 
+@audit.audited_tool("Sign_in_to_Dataverse", "READ")
 async def tool_authenticate() -> str:
     """
     Start a Microsoft interactive browser authentication flow and return instructions for the user.
@@ -54,6 +56,7 @@ async def tool_authenticate() -> str:
         return f"Failed to initiate authentication: {e}"
 
 
+@audit.audited_tool("Sign_out_from_Dataverse", "READ")
 async def tool_sign_out() -> str:
     """
     Sign out the current user from Dataverse (CRM).

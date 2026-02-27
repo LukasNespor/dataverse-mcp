@@ -23,5 +23,8 @@ VOLUME ["/data"]
 ENV PYTHONPATH=/app/src
 ENV PYTHONUNBUFFERED=1
 
+# HTTP transport port for Azure/OBO mode
+EXPOSE 8000
+
 # Run the MCP server via stdio (default FastMCP transport)
 CMD ["python", "src/main.py"]

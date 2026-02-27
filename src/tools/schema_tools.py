@@ -9,14 +9,16 @@ current authenticated user's identity.
 import logging
 from typing import Any, Optional
 
+import audit
 import cache
 import dataverse
-from auth import AuthenticationRequiredError
+from token_resolver import resolve_token, get_user_oid, OBO_TOKEN_DEFAULT
 
 logger = logging.getLogger(__name__)
 
 
-async def tool_whoami() -> Any:
+@audit.audited_tool("Get_my_identity", "READ")
+async def tool_whoami(_obo_token: Optional[str] = OBO_TOKEN_DEFAULT) -> Any:
     """
     Return the identity of the currently authenticated Dataverse (CRM) user.
 
@@ -44,8 +46,10 @@ async def tool_whoami() -> Any:
       timezone and convert to UTC.
     """
     try:
-        return await dataverse.whoami()
-    except AuthenticationRequiredError:
+        token = await resolve_token(_obo_token)
+        user_oid = get_user_oid(_obo_token)
+        return await dataverse.whoami(token=token, user_oid=user_oid)
+    except dataverse.AuthenticationRequiredError:
         return (
             "`whoami` failed: not authenticated. "
             "Call `Sign_in_to_Dataverse` to sign in, then retry."
@@ -55,7 +59,8 @@ async def tool_whoami() -> Any:
         return f"Failed to retrieve user identity: {e}"
 
 
-async def tool_list_tables() -> Any:
+@audit.audited_tool("List_tables", "READ")
+async def tool_list_tables(_obo_token: Optional[str] = OBO_TOKEN_DEFAULT) -> Any:
     """
     Return a compact pipe-delimited list of all tables (entities) in the Dataverse environment.
 
@@ -80,8 +85,9 @@ async def tool_list_tables() -> Any:
     to get the full field-level metadata (attributes, types, required fields).
     """
     try:
-        return await dataverse.list_tables()
-    except AuthenticationRequiredError:
+        token = await resolve_token(_obo_token)
+        return await dataverse.list_tables(token=token)
+    except dataverse.AuthenticationRequiredError:
         return (
             "`list_tables` failed: not authenticated. "
             "Call `Sign in to Dataverse` to sign in, then retry."
@@ -91,7 +97,11 @@ async def tool_list_tables() -> Any:
         return f"Failed to retrieve table list: {e}"
 
 
-async def tool_get_schema(table_names: Optional[list[str]] = None) -> Any:
+@audit.audited_tool("Get_table_schema", "READ")
+async def tool_get_schema(
+    table_names: Optional[list[str]] = None,
+    _obo_token: Optional[str] = OBO_TOKEN_DEFAULT,
+) -> Any:
     """
     Retrieve the schema (entity definition and field metadata) for one or more Dataverse (CRM) tables.
 
@@ -148,8 +158,9 @@ async def tool_get_schema(table_names: Optional[list[str]] = None) -> Any:
     - After " — ": optional description providing extra context about the field
     """
     try:
-        return await dataverse.get_table_schema(table_names=table_names)
-    except AuthenticationRequiredError:
+        token = await resolve_token(_obo_token)
+        return await dataverse.get_table_schema(token=token, table_names=table_names)
+    except dataverse.AuthenticationRequiredError:
         return (
             "`get_schema` failed: not authenticated. "
             "Call `Sign_in_to_Dataverse` to sign in, then retry."
@@ -159,6 +170,7 @@ async def tool_get_schema(table_names: Optional[list[str]] = None) -> Any:
         return f"Failed to retrieve schema for {table_names}: {e}"
 
 
+@audit.audited_tool("Refresh_schema_cache", "READ")
 async def tool_invalidate_cache(table_name: Optional[str] = None) -> str:
     """
     Invalidate cached schema data to force a fresh fetch from the Dataverse (CRM) API.

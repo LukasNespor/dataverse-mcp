@@ -2,6 +2,9 @@ services:
   dataverse-mcp:
     build: .
     container_name: dataverse-mcp
+    depends_on:
+      redis:
+        condition: service_healthy
     environment:
       # Required: your Dataverse environment URL (no trailing slash)
       - DATAVERSE_URL=${DATAVERSE_URL}
@@ -11,6 +14,8 @@ services:
       - CLIENT_ID=${CLIENT_ID}
       # Optional: fixed port for interactive auth redirect server (must match published port below)
       - AUTH_REDIRECT_PORT=${AUTH_REDIRECT_PORT:-5577}
+      # Redis for shared proposal storage
+      - REDIS_URL=redis://redis:6379/0
     ports:
       # Interactive auth redirect — browser redirects here after sign-in
       - "${AUTH_REDIRECT_PORT:-5577}:${AUTH_REDIRECT_PORT:-5577}"
@@ -21,5 +26,18 @@ services:
     tty: false
     restart: unless-stopped
 
+  redis:
+    image: redis:7-alpine
+    container_name: dataverse-redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
 volumes:
   dataverse-data:
+  redis-data:
