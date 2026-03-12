@@ -33,9 +33,9 @@ TABLES_CACHE_TTL_SECONDS: int = 86400  # 24 hours
 _GLOBAL_KEY = "__global__"
 
 # Redis key prefixes
-_PREFIX_WHOAMI = "mcp:whoami:"
-_PREFIX_SCHEMA = "mcp:schema:"
-_KEY_TABLES = "mcp:tables"
+_PREFIX_WHOAMI = "dataverse:whoami:"
+_PREFIX_SCHEMA = "dataverse:schema:"
+_KEY_TABLES = "dataverse:tables"
 
 
 # ---------------------------------------------------------------------------
@@ -44,10 +44,20 @@ _KEY_TABLES = "mcp:tables"
 
 def _connect_redis():
     import redis as redis_lib
+    from redis.retry import Retry
+    from redis.backoff import ExponentialBackoff
+
+    retry = Retry(ExponentialBackoff(cap=5, base=0.5), retries=3)
     r = redis_lib.Redis.from_url(
         settings.redis_url,
         decode_responses=True,
         socket_connect_timeout=5,
+        socket_keepalive=True,
+        socket_timeout=5,
+        retry_on_timeout=True,
+        retry_on_error=[redis_lib.ConnectionError],
+        retry=retry,
+        health_check_interval=30,
     )
     r.ping()
     logger.info("Redis cache connected to %s", settings.redis_url.split("@")[-1])

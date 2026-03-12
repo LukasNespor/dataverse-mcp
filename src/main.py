@@ -41,6 +41,16 @@ logging.basicConfig(
 )
 logging.getLogger("mcp.shared.tool_name_validation").setLevel(logging.ERROR)
 
+
+class _Drop404Filter(logging.Filter):
+    """Suppress Uvicorn access-log entries for 404 responses (bot scanner noise)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "404" not in getattr(record, "message", record.getMessage())
+
+
+logging.getLogger("uvicorn.access").addFilter(_Drop404Filter())
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -126,11 +136,15 @@ CACHE:
 # ---------------------------------------------------------------------------
 
 if settings.is_azure_mode:
+    from cryptography.fernet import Fernet
     from fastmcp.server.auth.providers.azure import AzureProvider
+    from key_value.aio.stores.redis import RedisStore
+    from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
+    from redis.asyncio import Redis as AsyncRedis
 
     logger.info("Starting in Azure OBO mode (client_secret is set)")
 
-    auth_provider = AzureProvider(
+    azure_kwargs: dict = dict(
         client_id=settings.client_id,
         client_secret=settings.client_secret,
         tenant_id=settings.tenant_id,
@@ -141,6 +155,28 @@ if settings.is_azure_mode:
             "offline_access",
         ],
     )
+
+    if settings.jwt_signing_key:
+        azure_kwargs["jwt_signing_key"] = settings.jwt_signing_key
+
+    if settings.storage_encryption_key:
+        # Build the async Redis client ourselves because RedisStore's url=
+        # parser drops the rediss:// scheme, breaking SSL for Azure Cache.
+        _async_redis = AsyncRedis.from_url(
+            settings.redis_url,
+            decode_responses=True,
+            socket_connect_timeout=5,
+            socket_keepalive=True,
+            socket_timeout=5,
+            retry_on_timeout=True,
+            health_check_interval=30,
+        )
+        azure_kwargs["client_storage"] = FernetEncryptionWrapper(
+            key_value=RedisStore(client=_async_redis),
+            fernet=Fernet(settings.storage_encryption_key),
+        )
+
+    auth_provider = AzureProvider(**azure_kwargs)
 
     # Azure issues v1.0 tokens by default (accessTokenAcceptedVersion=null/1).
     # v1.0 and v2.0 tokens differ in issuer and audience claims:

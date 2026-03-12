@@ -39,8 +39,16 @@ async def resolve_token(obo_token: Optional[str] = None) -> str:
 
     Raises:
         auth.AuthenticationRequiredError: in local mode when no cached token exists.
+        RuntimeError: in Azure mode when the injected token is not a string
+                      (indicates a FastMCP dependency injection failure).
     """
-    if obo_token:
+    if obo_token is not None:
+        if not isinstance(obo_token, str):
+            raise RuntimeError(
+                f"resolve_token: expected a string OBO token but received {type(obo_token).__name__}. "
+                "This indicates a FastMCP dependency injection failure — the EntraOBOToken "
+                "dependency was not resolved before the tool was called."
+            )
         return obo_token
     # Local mode — use MSAL interactive auth
     from auth import get_token
@@ -49,22 +57,56 @@ async def resolve_token(obo_token: Optional[str] = None) -> str:
 
 def get_user_oid(obo_token: Optional[str] = None) -> Optional[str]:
     """
-    Extract the user's Entra ID object ID (oid) from an OBO token.
+    Extract a unique user identifier from an OBO token for per-user cache keying.
+
+    Tries the following claims in order:
+    - oid (Entra ID object ID — stable, preferred)
+    - sub (subject — resource-specific but always present as fallback)
 
     Returns None in local mode (single-user, no per-user keying needed).
     """
-    if not obo_token or not settings.is_azure_mode:
+    if not settings.is_azure_mode:
+        return None
+
+    if not obo_token or not isinstance(obo_token, str):
+        logger.warning(
+            "get_user_oid: obo_token is missing or not a string (type=%s). "
+            "Per-user cache keying disabled — falling back to global key.",
+            type(obo_token).__name__,
+        )
         return None
 
     import json
     import base64
 
     try:
-        # JWT payload is the second segment
+        # JWT payload is the second segment (header.payload.signature)
         payload = obo_token.split(".")[1]
         # Add padding if needed
         payload += "=" * (4 - len(payload) % 4)
         claims = json.loads(base64.urlsafe_b64decode(payload))
-        return claims.get("oid")
-    except Exception:
+
+        oid = claims.get("oid")
+        if oid:
+            logger.debug("get_user_oid: resolved oid=%s", oid)
+            return oid
+
+        # Fallback: sub is always present in Entra ID tokens
+        sub = claims.get("sub")
+        if sub:
+            logger.warning(
+                "get_user_oid: 'oid' claim missing from OBO token — falling back to 'sub'. "
+                "Claims present: %s",
+                list(claims.keys()),
+            )
+            return sub
+
+        logger.error(
+            "get_user_oid: neither 'oid' nor 'sub' found in OBO token. "
+            "Claims present: %s. Per-user cache keying disabled.",
+            list(claims.keys()),
+        )
+        return None
+    except Exception as exc:
+        logger.error("get_user_oid: failed to decode OBO token: %s", exc)
         return None

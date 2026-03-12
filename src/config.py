@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     # Azure/OBO mode — set client_secret to activate
     client_secret: Optional[str] = None
     mcp_base_url: str = "http://localhost:8000"
+    jwt_signing_key: Optional[str] = None  # Stable key for signing JWTs (Azure mode)
+    storage_encryption_key: Optional[str] = None  # Fernet key for encrypting OAuth tokens at rest
 
     # Destructive-action confirmation settings
     confirm_token_ttl_seconds: int = 120  # 2 minutes

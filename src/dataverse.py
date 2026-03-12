@@ -94,12 +94,110 @@ _SYSTEM_TABLE_PREFIXES = (
     "principalobjectattributeaccess",
     "fieldsecurityprofile",
     "fieldpermission",
+    # Platform / infrastructure tables
+    "duplicaterule",    # duplicaterulecondition, duplicaterecord
+    "mailbox",          # mailboxtrackingfolder, mailboxstatistics
+    "mailmerge",        # mailmergetemplate
+    "metric",           # metric, goalrollupquery
+    "customcontrol",    # customcontrolresource, customcontroldefaultconfig
+    "processstage",     # processlog, processsession, processtrigger
+    "privilege",        # privilegesremoval
+    "role",             # roletemplate
+    "systemform",
+    "template",         # email templates
+    "territory",
+    "theme",
+    "topicmodel",       # topicmodelconfiguration, topicmodelexecutionhistory
+    "transactioncurrency",
+    "webresource",
+    "attributemap",
+    "entitymap",
+    "displaystring",
+    "calendar",         # calendarrule
+    "connectionrole",   # connectionroleassociation
+    "customapi",        # customapirequestparameter, customapiresponseproperty
+    "managedproperty",
+    "entitydataprovider",
+    "appconfigmaster",  # appconfiginstance, appconfig
+    "appmodule",        # appmoduleroles, appmodulecomponent
+    "sitemap",
+    "catalog",          # catalogassignment
+    "bot",              # botcomponent
+    "aiplugin",         # aipluginoperation, aiplugintitle, …
+    "credential",
+    "datalake",         # datalakefolder, datalakeworkspace
+    "elasticfile",
+    "keyvault",         # keyvaultreference
+    "nlsq",             # natural language to SQL internals
+    "revoke",           # revokedinheritedaccessrecordstracker
+    "shared",           # sharedlinksetting, sharedobject
+    "stagesolutionupload",
+    "synapsedatabase",  # synapselinkexternaltablestate, …
+    "activityfileattachment",
 )
+
+
+# Specific tables excluded from List_tables output (noisy, rarely useful for CRM work).
+# Users can still query these via List_records/Get_table_schema directly.
+_EXCLUDED_TABLES = {
+    "organization", "fileattachment", "usersettings",
+    # Platform internals
+    "businessunit", "systemuser", "team", "position",
+    "activitypointer", "activityparty", "activitymimeattachment",
+    "annotation", "attachment",
+    "queue", "queueitem",
+    "sla", "slakpiinstance",
+    "goal", "goalrollupquery", "rollupfield",
+    "subject", "category", "feedback",
+    "postregarding", "post",
+    "recurringappointmentmaster",
+    "customerrelationship", "customeraddress",
+    "connectionrole", "connection",
+    "sharepointsite", "sharepointdocumentlocation", "sharepointdocument",
+    "mailmergetemplate", "savedquery", "userquery",
+    "report", "reportcategory",
+    "userform", "systemform",
+    "transactioncurrency", "territory", "theme",
+    "calendar", "calendarrule",
+    "duplicaterecord",
+    "bulkoperation", "bulkoperationlog",
+    "interactionforemail",
+    "convertrule", "convertruleitem",
+    "routingrule", "routingruleitem",
+    "processsession",
+    "socialactivity", "socialprofile",
+    "externalparty", "externalpartyitem",
+    "bookableresource", "bookableresourcebooking", "bookableresourcebookingheader",
+    "bookableresourcecategory", "bookableresourcecategoryassn",
+    "bookableresourcecharacteristic", "bookableresourcegroup",
+    "bookingstatus", "characteristic", "ratingmodel", "ratingvalue",
+    "channelaccessprofile", "channelaccessprofilerule", "channelaccessprofileruleitem",
+    "privilege", "role", "teamtemplate",
+    "webresource", "displaystring",
+    "monthlyfiscalcalendar", "fixedmonthlyfiscalcalendar",
+    "quarterlyfiscalcalendar", "semiannualfiscalcalendar", "annualfiscalcalendar",
+    "timezonedefinition", "timezonerule", "timezonelocalizedname",
+    "languagelocale", "languageprovisioningstate",
+    "expiredprocess", "newprocess", "translationprocess",
+    "hierarchyrule", "hierarchysecurityconfiguration",
+    "kbarticle", "kbarticletemplate", "kbarticlecomment",
+    "topichistory",
+    "dynamicproperty", "dynamicpropertyassociation",
+    "dynamicpropertyinstance", "dynamicpropertyoptionsetitem",
+}
 
 
 def _is_system_table(logical_name: str) -> bool:
     """Return True if the table is a known system/platform table."""
-    return logical_name.startswith(_SYSTEM_TABLE_PREFIXES)
+    return logical_name.startswith(_SYSTEM_TABLE_PREFIXES) or logical_name in _EXCLUDED_TABLES
+
+
+def _label(obj) -> Optional[str]:
+    """Extract a localized label from a Dataverse metadata label object."""
+    if not obj:
+        return None
+    lv = obj.get("LocalizedLabels", [])
+    return lv[0].get("Label") if lv else (obj.get("UserLocalizedLabel") or {}).get("Label")
 
 
 def _parse_dataverse_error(response: httpx.Response) -> str:
@@ -372,20 +470,14 @@ async def list_tables(token: str) -> str:
         },
     )
 
-    def label(obj) -> Optional[str]:
-        if not obj:
-            return None
-        lv = obj.get("LocalizedLabels", [])
-        return lv[0].get("Label") if lv else (obj.get("UserLocalizedLabel") or {}).get("Label")
-
-    lines = ["LogicalName | DisplayName | EntitySetName"]
+    lines = ["LogicalName|DisplayName|EntitySetName"]
     for e in result.get("value", []):
         ln = e.get("LogicalName", "")
-        dn = label(e.get("DisplayName")) or ""
+        dn = _label(e.get("DisplayName")) or ""
         es = e.get("EntitySetName", "")
         if not dn or _is_system_table(ln):
             continue
-        lines.append(f"{ln} | {dn} | {es}")
+        lines.append(f"{ln}|{dn}|{es}")
 
     text = "\n".join(lines)
     cache.set_tables(text)
@@ -428,6 +520,23 @@ async def get_table_schema(token: str, table_names: Optional[list[str]] = None) 
                 },
             )
             entity["Attributes"] = attrs_result.get("value", [])
+
+            # Fetch Targets for lookup fields (only available via type cast)
+            try:
+                lookups_result = await _request(
+                    "GET",
+                    f"/EntityDefinitions(LogicalName='{name}')/Attributes"
+                    "/Microsoft.Dynamics.CRM.LookupAttributeMetadata",
+                    token=token,
+                    params={"$select": "LogicalName,Targets"},
+                )
+                lookup_targets = {
+                    lk.get("LogicalName"): lk.get("Targets", [])
+                    for lk in lookups_result.get("value", [])
+                }
+                entity["_lookup_targets"] = lookup_targets
+            except Exception as e:
+                logger.warning("Failed to fetch lookup targets for '%s': %s", name, e)
             cleaned = _clean_entity(entity)
             cache.set_schema(name, cleaned)
             results.append(cleaned)
@@ -446,16 +555,11 @@ async def get_table_schema(token: str, table_names: Optional[list[str]] = None) 
 
 def _clean_entity(entity: dict) -> str:
     """Format entity metadata as compact pipe-delimited text."""
-    def label(obj) -> Optional[str]:
-        if not obj:
-            return None
-        lv = obj.get("LocalizedLabels", [])
-        return lv[0].get("Label") if lv else (obj.get("UserLocalizedLabel") or {}).get("Label")
-
     name = entity.get("LogicalName", "")
-    display = label(entity.get("DisplayName")) or ""
+    display = _label(entity.get("DisplayName")) or ""
     pid = entity.get("PrimaryIdAttribute", "")
     pname = entity.get("PrimaryNameAttribute", "")
+    lookup_targets = entity.get("_lookup_targets", {})
 
     lines = [
         f"Table: {name} ({display})",
@@ -469,14 +573,18 @@ def _clean_entity(entity: dict) -> str:
         ln = a.get("LogicalName", "")
         if ln in SYSTEM_ATTRIBUTES:
             continue
-        display_name = label(a.get("DisplayName")) or ""
+        display_name = _label(a.get("DisplayName")) or ""
         atype = a.get("AttributeType", "")
         req_val = a.get("RequiredLevel", {}).get("Value", "")
         req = "Y" if req_val in ("SystemRequired", "ApplicationRequired") else ""
-        desc = label(a.get("Description")) or ""
+        desc = _label(a.get("Description")) or ""
         line = f"{ln} | {display_name} | {atype} | {req}"
+        # Append lookup targets (e.g. "-> contact,account")
+        targets = lookup_targets.get(ln)
+        if targets:
+            line += f" -> {','.join(targets)}"
         if desc:
-            line += f" — {desc}"
+            line += f" - {desc}"
         lines.append(line)
 
     return "\n".join(lines)

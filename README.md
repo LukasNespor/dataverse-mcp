@@ -215,6 +215,8 @@ TENANT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx   # must be the GUID, not a domai
 CLIENT_ID=your-client-id
 CLIENT_SECRET=your-client-secret
 MCP_BASE_URL=http://localhost:8000                # or https://your-app.azurewebsites.net
+JWT_SIGNING_KEY=...                               # python -c "import secrets; print(secrets.token_urlsafe(32))"
+STORAGE_ENCRYPTION_KEY=...                        # python -c "import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())"
 ```
 
 > **Important:** `TENANT_ID` must be the tenant GUID (e.g. `bb05be88-...`), not a domain name (e.g. `contoso.com`). Azure endpoints accept both forms, but the JWT `iss` claim always uses the GUID — a domain name causes issuer mismatch during token validation.
@@ -301,6 +303,8 @@ In Azure mode, the server acts as a confidential client. The MCP client authenti
 | `REDIS_URL` | Yes | — | Redis connection string (set automatically in docker-compose, e.g. `redis://redis:6379/0`) |
 | `CLIENT_SECRET` | No | — | Set to activate Azure/OBO mode (confidential client for multi-user deployments) |
 | `MCP_BASE_URL` | No | `http://localhost:8000` | Public URL of the server in Azure mode |
+| `JWT_SIGNING_KEY` | No | — | Stable key for signing JWTs issued by the OAuth proxy (Azure mode). Must persist across restarts. Generate: `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
+| `STORAGE_ENCRYPTION_KEY` | No | — | Fernet key for encrypting OAuth tokens at rest in Redis (Azure mode). Must persist across restarts. Generate: `python -c "import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())"` |
 | `CONFIRM_TOKEN_TTL_SECONDS` | No | `120` | How long a delete proposal remains valid (seconds) |
 
 ---
@@ -311,12 +315,13 @@ Redis is required and runs as a sidecar container via docker-compose. It stores:
 
 - **App cache**: WhoAmI identity, table schema, and table list with native TTL expiry
 - **Delete proposals**: Two-step confirmation tokens with automatic expiry
+- **OAuth session state** (Azure mode): Client registrations, authorization codes, and issued tokens — encrypted at rest with Fernet when `STORAGE_ENCRYPTION_KEY` is set
 
 To inspect cached data:
 
 ```bash
 docker compose exec redis redis-cli
-KEYS mcp:*
+KEYS dataverse:*
 ```
 
 Redis data persists across container restarts via the `redis-data` Docker volume.
@@ -368,6 +373,7 @@ Claude calls `Refresh schema cache` for the `appointment` table, then re-fetches
 - MSAL cache files (local mode) are written with `chmod 600` (owner read/write only)
 - The container runs as a non-root user (`mcpuser`)
 - In Azure mode, the client secret is passed only via environment variable — never stored in code or logs
+- OAuth session state (tokens, codes) is encrypted at rest in Redis using Fernet symmetric encryption
 - Per-user OBO tokens ensure users can only access Dataverse data they are authorized for
 - Never commit `.env` to git — it is listed in `.gitignore` by default in this repo
 

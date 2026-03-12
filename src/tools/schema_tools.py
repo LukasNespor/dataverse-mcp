@@ -67,9 +67,9 @@ async def tool_list_tables(_obo_token: Optional[str] = OBO_TOKEN_DEFAULT) -> Any
     Results are cached for 24 hours, so this call is very cheap after the first fetch.
 
     Output format (pipe-delimited text):
-        LogicalName | DisplayName | EntitySetName
-        account | Account | accounts
-        contact | Contact | contacts
+        LogicalName|DisplayName|EntitySetName
+        account|Account|accounts
+        contact|Contact|contacts
         ...
 
     - LogicalName: the singular API name to pass to `Get_table_schema` (e.g. "account")
@@ -140,8 +140,8 @@ async def tool_get_schema(
         Field | Display Name | Type | Req
         name | Account Name | String | Y
         revenue | Annual Revenue | Money |
-        primarycontactid | Primary Contact | Lookup |
-        description | Description | Memo | — Main business description
+        primarycontactid | Primary Contact | Lookup | -> contact
+        description | Description | Memo | - Main business description
 
     Columns:
     - Field: LogicalName — use in data payloads, $select, and $filter
@@ -155,7 +155,9 @@ async def tool_get_schema(
         Picklist / Status / State → integer option value
         Lookup          → OData bind: "fieldname@odata.bind": "/entityset(<GUID>)"
     - Req: "Y" = required on create (SystemRequired or ApplicationRequired), empty = optional
-    - After " — ": optional description providing extra context about the field
+    - After " -> ": lookup target table(s) — tells you which entity the lookup points to
+      (e.g. "-> contact" means bind to "/contacts(<GUID>)")
+    - After " - ": optional description providing extra context about the field
     """
     try:
         token = await resolve_token(_obo_token)

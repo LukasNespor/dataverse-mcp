@@ -16,6 +16,9 @@ services:
       - CLIENT_SECRET=${CLIENT_SECRET:-}
       # Azure OBO mode: public URL for OAuth redirect (only used when CLIENT_SECRET is set)
       - MCP_BASE_URL=${MCP_BASE_URL:-http://localhost:8000}
+      # Azure OBO mode: stable keys for session persistence (optional, but required for restart survival)
+      - JWT_SIGNING_KEY=${JWT_SIGNING_KEY:-}
+      - STORAGE_ENCRYPTION_KEY=${STORAGE_ENCRYPTION_KEY:-}
       # Optional: fixed port for interactive auth redirect server (must match published port below)
       - AUTH_REDIRECT_PORT=${AUTH_REDIRECT_PORT:-5577}
       # Redis for shared proposal storage
@@ -33,6 +36,12 @@ services:
   redis:
     image: redis:7-alpine
     container_name: dataverse-redis
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --save "60 1"
+      --appendonly no
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s

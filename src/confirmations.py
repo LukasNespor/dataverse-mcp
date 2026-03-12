@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 CONFIRM_PHRASE = "CONFIRM DELETE"
 
 # Redis key prefix to namespace proposals.
-_REDIS_PREFIX = "mcp:proposal:"
+_REDIS_PREFIX = "dataverse:proposal:"
 
 
 # ---------------------------------------------------------------------------
@@ -97,10 +97,20 @@ return 0
 
 def _connect_redis():
     import redis as redis_lib
+    from redis.retry import Retry
+    from redis.backoff import ExponentialBackoff
+
+    retry = Retry(ExponentialBackoff(cap=5, base=0.5), retries=3)
     r = redis_lib.Redis.from_url(
         settings.redis_url,
         decode_responses=True,
         socket_connect_timeout=5,
+        socket_keepalive=True,
+        socket_timeout=5,
+        retry_on_timeout=True,
+        retry_on_error=[redis_lib.ConnectionError],
+        retry=retry,
+        health_check_interval=30,
     )
     r.ping()
     logger.info("Redis proposal store connected to %s", settings.redis_url.split("@")[-1])

@@ -11,7 +11,7 @@ from cache import WHOAMI_CACHE_TTL_SECONDS, SCHEMA_CACHE_TTL_SECONDS, TABLES_CAC
 
 SAMPLE_WHOAMI = {"UserId": "uid-1", "FullName": "Jane Doe", "TimeZoneCode": 110}
 SAMPLE_SCHEMA = "Table: contact (Contact)\nPrimary ID: contactid\n\nField | Display | Type | Req\nfirstname | First Name | String |"
-SAMPLE_TABLES = "LogicalName | DisplayName | EntitySetName\naccount | Account | accounts"
+SAMPLE_TABLES = "LogicalName|DisplayName|EntitySetName\naccount|Account|accounts"
 
 
 # ---------------------------------------------------------------------------
