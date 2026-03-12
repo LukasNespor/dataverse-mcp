@@ -12,11 +12,7 @@ from typing import Any, Optional
 import httpx
 
 import cache
-from auth import AuthenticationRequiredError
 from config import settings
-
-# Re-export so tools can import from dataverse
-__all__ = ["AuthenticationRequiredError"]
 
 logger = logging.getLogger(__name__)
 
@@ -282,7 +278,7 @@ async def _request(
 # ---------------------------------------------------------------------------
 
 
-async def whoami(token: str, user_oid: Optional[str] = None) -> dict:
+async def whoami(token: str, user_oid: str) -> dict:
     """
     Return the identity of the currently authenticated Dataverse user.
 
@@ -293,7 +289,6 @@ async def whoami(token: str, user_oid: Optional[str] = None) -> dict:
     Args:
         token: Bearer access token for Dataverse.
         user_oid: Entra ID object ID of the user (for per-user cache keying).
-                  If None, uses a global cache key (local/single-user mode).
 
     Returns:
       - UserId (str): GUID of the authenticated user — use for owner/assignee fields.

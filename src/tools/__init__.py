@@ -1,10 +1,6 @@
 from dataclasses import dataclass
 from typing import Optional
 
-from tools.auth_tools import (
-    tool_authenticate,
-    tool_sign_out,
-)
 from tools.record_tools import (
     tool_list_records,
     tool_create_record,
@@ -20,8 +16,6 @@ from tools.schema_tools import (
 )
 
 __all__ = [
-    "tool_authenticate",
-    "tool_sign_out",
     "tool_list_records",
     "tool_create_record",
     "tool_update_record",
@@ -49,16 +43,6 @@ class ToolMeta:
 
 
 TOOL_REGISTRY: dict[str, ToolMeta] = {
-    "Sign_in_to_Dataverse": ToolMeta(
-        tool_name="Sign_in_to_Dataverse",
-        category="READ",
-        description="Interactive browser sign-in",
-    ),
-    "Sign_out_from_Dataverse": ToolMeta(
-        tool_name="Sign_out_from_Dataverse",
-        category="READ",
-        description="Clear cached auth tokens",
-    ),
     "Get_my_identity": ToolMeta(
         tool_name="Get_my_identity",
         category="READ",

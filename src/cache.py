@@ -2,10 +2,10 @@
 App cache for WhoAmI identity, table schema, and table list data.
 
 Uses Redis with native key expiry for all cache storage. Redis is required
-and runs alongside the server in Docker (both local dev and Azure).
+and runs alongside the server in Docker.
 
 TTL policy:
-  - WhoAmI: 24 hours. Invalidated on re-authentication / sign-out.
+  - WhoAmI: 24 hours per user (keyed by Entra ID object ID).
   - Table schema: 1 hour (configurable to 0 to disable).
   - Table list: 24 hours.
 
@@ -28,9 +28,6 @@ logger = logging.getLogger(__name__)
 WHOAMI_CACHE_TTL_SECONDS: int = 86400  # 24 hours
 SCHEMA_CACHE_TTL_SECONDS: int = 3600   # 1 hour; set to 0 to disable
 TABLES_CACHE_TTL_SECONDS: int = 86400  # 24 hours
-
-# Global cache key used for single-user (local) mode
-_GLOBAL_KEY = "__global__"
 
 # Redis key prefixes
 _PREFIX_WHOAMI = "dataverse:whoami:"
@@ -80,25 +77,25 @@ def _scan_delete(pattern: str) -> int:
 # WhoAmI
 # ---------------------------------------------------------------------------
 
-def get_whoami(user_oid: Optional[str] = None) -> Optional[dict]:
-    key = f"{_PREFIX_WHOAMI}{user_oid or _GLOBAL_KEY}"
+def get_whoami(user_oid: str) -> Optional[dict]:
+    key = f"{_PREFIX_WHOAMI}{user_oid}"
     raw = _redis.get(key)
     if raw is None:
         return None
     return json.loads(raw)
 
 
-def set_whoami(user_oid: Optional[str], data: dict) -> None:
-    key = f"{_PREFIX_WHOAMI}{user_oid or _GLOBAL_KEY}"
+def set_whoami(user_oid: str, data: dict) -> None:
+    key = f"{_PREFIX_WHOAMI}{user_oid}"
     _redis.set(key, json.dumps(data), ex=WHOAMI_CACHE_TTL_SECONDS)
-    logger.debug("WhoAmI cached in Redis for %s", user_oid or _GLOBAL_KEY)
+    logger.debug("WhoAmI cached in Redis for %s", user_oid)
 
 
 def invalidate_whoami(user_oid: Optional[str] = None) -> None:
     if user_oid is not None:
-        key = f"{_PREFIX_WHOAMI}{user_oid or _GLOBAL_KEY}"
+        key = f"{_PREFIX_WHOAMI}{user_oid}"
         _redis.delete(key)
-        logger.info("WhoAmI cache invalidated for %s", user_oid or _GLOBAL_KEY)
+        logger.info("WhoAmI cache invalidated for %s", user_oid)
     else:
         count = _scan_delete(f"{_PREFIX_WHOAMI}*")
         logger.info("WhoAmI cache invalidated for all users (%d keys)", count)

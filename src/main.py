@@ -1,18 +1,15 @@
 """
 Dataverse MCP Server entrypoint.
 
-Registers all tools with FastMCP and starts the server.
-
-Supports two modes:
-  - Local (stdio/SSE): single-user with interactive MSAL browser auth.
-  - Azure (HTTP + OBO): multi-user with Entra ID On-Behalf-Of flow via FastMCP AzureProvider.
+Registers all tools with FastMCP and starts the server using Entra ID
+On-Behalf-Of (OBO) authentication via FastMCP AzureProvider.
 
 Environment variables (set via Docker or .env file):
   DATAVERSE_URL            (required) — e.g. https://yourorg.crm4.dynamics.com
   TENANT_ID                (optional) — Azure AD tenant ID, defaults to "common"
   CLIENT_ID                (required) — Azure AD app client ID from your Entra ID app registration
-  CLIENT_SECRET            (optional) — set to activate Azure/OBO mode (confidential client)
-  MCP_BASE_URL             (optional) — public URL of the server in Azure mode, default http://localhost:8000
+  CLIENT_SECRET            (required) — Azure AD app client secret (confidential client)
+  MCP_BASE_URL             (optional) — public URL of the server, default http://localhost:8000
   REDIS_URL                (required) — Redis connection string, e.g. redis://redis:6379/0
 """
 
@@ -21,7 +18,12 @@ import sys
 
 import cache  # noqa: F401 — import establishes Redis connection at startup
 from config import settings
+from cryptography.fernet import Fernet
 from fastmcp import FastMCP
+from fastmcp.server.auth.providers.azure import AzureProvider
+from key_value.aio.stores.redis import RedisStore
+from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
+from redis.asyncio import Redis as AsyncRedis
 from tools import (
     tool_create_record,
     tool_delete_record,
@@ -37,7 +39,7 @@ from tools import (
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    stream=sys.stderr,  # Log to stderr to avoid polluting MCP stdio protocol on stdout
+    stream=sys.stderr,
 )
 logging.getLogger("mcp.shared.tool_name_validation").setLevel(logging.ERROR)
 
@@ -54,30 +56,16 @@ logging.getLogger("uvicorn.access").addFilter(_Drop404Filter())
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Instructions text — differs between Azure and local mode
+# Instructions text
 # ---------------------------------------------------------------------------
 
-_LOCAL_AUTH_INSTRUCTIONS = """
-AUTHENTICATION:
-- Just call Dataverse tools directly. If a tool returns an error mentioning authentication,
-  call `Sign_in_to_Dataverse` to get a sign-in URL and present it to the user.
-  The token exchange happens automatically when the browser redirects — no second tool call is needed.
-  Once the user confirms they have signed in, call `Get_my_identity` to verify the session
-  and greet the user by their FullName (e.g. "Hello, John!").
-- To sign out (e.g. to switch accounts), call `Sign_out_from_Dataverse`.
-"""
-
-_AZURE_AUTH_INSTRUCTIONS = """
-AUTHENTICATION:
-- You are already authenticated via Entra ID. No sign-in or sign-out tools are needed.
-  Just call Dataverse tools directly. Call `Get_my_identity` to get the current user's identity.
-"""
-
-_COMMON_INSTRUCTIONS = """
+_INSTRUCTIONS = """\
 You are connected to a Microsoft Dataverse (CRM) environment via its Web API.
 When the user says "CRM" or "Dataverse" or "Dynamics", they mean the same system.
 
-{auth_section}
+AUTHENTICATION:
+- You are already authenticated via Entra ID. No sign-in or sign-out tools are needed.
+  Just call Dataverse tools directly. Call `Get_my_identity` to get the current user's identity.
 
 BEFORE CREATING OR UPDATING ANY RECORD:
 1. If you don't know the exact table LogicalName, call `List_tables` first.
@@ -132,89 +120,74 @@ CACHE:
 """
 
 # ---------------------------------------------------------------------------
-# Server setup — Azure or local mode
+# Server setup — Azure OBO mode
 # ---------------------------------------------------------------------------
 
-if settings.is_azure_mode:
-    from cryptography.fernet import Fernet
-    from fastmcp.server.auth.providers.azure import AzureProvider
-    from key_value.aio.stores.redis import RedisStore
-    from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
-    from redis.asyncio import Redis as AsyncRedis
+logger.info("Starting Dataverse MCP Server (Azure OBO mode)")
 
-    logger.info("Starting in Azure OBO mode (client_secret is set)")
+azure_kwargs: dict = dict(
+    client_id=settings.client_id,
+    client_secret=settings.client_secret,
+    tenant_id=settings.tenant_id,
+    base_url=settings.mcp_base_url,
+    required_scopes=settings.mcp_required_scopes,
+    additional_authorize_scopes=[
+        f"{settings.dataverse_url}/user_impersonation",
+        "offline_access",
+    ],
+)
 
-    azure_kwargs: dict = dict(
-        client_id=settings.client_id,
-        client_secret=settings.client_secret,
-        tenant_id=settings.tenant_id,
-        base_url=settings.mcp_base_url,
-        required_scopes=settings.mcp_required_scopes,
-        additional_authorize_scopes=[
-            f"{settings.dataverse_url}/user_impersonation",
-            "offline_access",
-        ],
-    )
+if settings.jwt_signing_key:
+    azure_kwargs["jwt_signing_key"] = settings.jwt_signing_key
 
-    if settings.jwt_signing_key:
-        azure_kwargs["jwt_signing_key"] = settings.jwt_signing_key
+# Build the async Redis client ourselves because RedisStore's url=
+# parser drops the rediss:// scheme, breaking SSL for Azure Cache.
+_async_redis = AsyncRedis.from_url(
+    settings.redis_url,
+    decode_responses=True,
+    socket_connect_timeout=5,
+    socket_keepalive=True,
+    socket_timeout=5,
+    retry_on_timeout=True,
+    health_check_interval=30,
+)
+_redis_store = RedisStore(client=_async_redis)
 
-    if settings.storage_encryption_key:
-        # Build the async Redis client ourselves because RedisStore's url=
-        # parser drops the rediss:// scheme, breaking SSL for Azure Cache.
-        _async_redis = AsyncRedis.from_url(
-            settings.redis_url,
-            decode_responses=True,
-            socket_connect_timeout=5,
-            socket_keepalive=True,
-            socket_timeout=5,
-            retry_on_timeout=True,
-            health_check_interval=30,
-        )
-        azure_kwargs["client_storage"] = FernetEncryptionWrapper(
-            key_value=RedisStore(client=_async_redis),
-            fernet=Fernet(settings.storage_encryption_key),
-        )
-
-    auth_provider = AzureProvider(**azure_kwargs)
-
-    # Azure issues v1.0 tokens by default (accessTokenAcceptedVersion=null/1).
-    # v1.0 and v2.0 tokens differ in issuer and audience claims:
-    #   v1.0: iss=https://sts.windows.net/{tid}/         aud=api://{client_id}
-    #   v2.0: iss=https://login.microsoftonline.com/…/v2.0  aud={client_id}
-    # Patch the JWTVerifier to accept both formats so the server works
-    # regardless of the accessTokenAcceptedVersion manifest setting.
-    _tid = settings.tenant_id
-    _cid = settings.client_id
-    auth_provider._token_validator.issuer = [
-        f"https://login.microsoftonline.com/{_tid}/v2.0",
-        f"https://sts.windows.net/{_tid}/",
-    ]
-    auth_provider._token_validator.audience = [
-        _cid,
-        f"api://{_cid}",
-    ]
-
-    mcp = FastMCP(
-        name="Dataverse MCP Server",
-        auth=auth_provider,
-        instructions=_COMMON_INSTRUCTIONS.format(auth_section=_AZURE_AUTH_INSTRUCTIONS),
+if settings.storage_encryption_key:
+    azure_kwargs["client_storage"] = FernetEncryptionWrapper(
+        key_value=_redis_store,
+        fernet=Fernet(settings.storage_encryption_key),
     )
 else:
-    logger.info("Starting in local mode (no client_secret)")
+    azure_kwargs["client_storage"] = _redis_store
 
-    mcp = FastMCP(
-        name="Dataverse MCP Server",
-        instructions=_COMMON_INSTRUCTIONS.format(auth_section=_LOCAL_AUTH_INSTRUCTIONS),
-    )
+auth_provider = AzureProvider(**azure_kwargs)
 
-    # Register auth tools only in local mode
-    from tools import tool_authenticate, tool_sign_out
-    mcp.tool(name="Sign_in_to_Dataverse", description=tool_authenticate.__doc__)(tool_authenticate)
-    mcp.tool(name="Sign_out_from_Dataverse", description=tool_sign_out.__doc__)(tool_sign_out)
+# Azure issues v1.0 tokens by default (accessTokenAcceptedVersion=null/1).
+# v1.0 and v2.0 tokens differ in issuer and audience claims:
+#   v1.0: iss=https://sts.windows.net/{tid}/         aud=api://{client_id}
+#   v2.0: iss=https://login.microsoftonline.com/…/v2.0  aud={client_id}
+# Patch the JWTVerifier to accept both formats so the server works
+# regardless of the accessTokenAcceptedVersion manifest setting.
+_tid = settings.tenant_id
+_cid = settings.client_id
+auth_provider._token_validator.issuer = [
+    f"https://login.microsoftonline.com/{_tid}/v2.0",
+    f"https://sts.windows.net/{_tid}/",
+]
+auth_provider._token_validator.audience = [
+    _cid,
+    f"api://{_cid}",
+]
+
+mcp = FastMCP(
+    name="Dataverse MCP Server",
+    auth=auth_provider,
+    instructions=_INSTRUCTIONS,
+)
 
 # ---------------------------------------------------------------------------
-# Register common tools (both modes)
+# Register tools
 # ---------------------------------------------------------------------------
 
 mcp.tool(name="Get_my_identity", description=tool_whoami.__doc__)(tool_whoami)
@@ -230,15 +203,5 @@ mcp.tool(name="Delete_record", description=tool_delete_record.__doc__)(tool_dele
 mcp.tool(name="Confirm_delete_record", description=tool_confirm_delete_record.__doc__)(tool_confirm_delete_record)
 
 if __name__ == "__main__":
-    import os
-    transport = os.environ.get("MCP_TRANSPORT", "stdio")
-    logger.info("Starting Dataverse MCP Server (transport=%s, azure_mode=%s)", transport, settings.is_azure_mode)
-
-    if settings.is_azure_mode:
-        # Azure mode always uses HTTP transport
-        mcp.run(transport="http", host="0.0.0.0", port=8000, stateless_http=True)
-    elif transport == "sse":
-        host = os.environ.get("MCP_HOST", "127.0.0.1")
-        mcp.run(transport=transport, host=host, port=8000)
-    else:
-        mcp.run(transport=transport)
+    logger.info("Starting Dataverse MCP Server (HTTP transport)")
+    mcp.run(transport="http", host="0.0.0.0", port=8000, stateless_http=True)

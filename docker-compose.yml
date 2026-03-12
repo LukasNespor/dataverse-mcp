@@ -12,25 +12,17 @@ services:
       - TENANT_ID=${TENANT_ID:-common}
       # Required: Azure AD Application (client) ID from your Entra ID app registration
       - CLIENT_ID=${CLIENT_ID}
-      # Optional: Azure AD Application (client) secret from your Entra ID app registration
-      - CLIENT_SECRET=${CLIENT_SECRET:-}
-      # Azure OBO mode: public URL for OAuth redirect (only used when CLIENT_SECRET is set)
+      # Required: Azure AD Application (client) secret from your Entra ID app registration
+      - CLIENT_SECRET=${CLIENT_SECRET}
+      # Public URL for OAuth redirect
       - MCP_BASE_URL=${MCP_BASE_URL:-http://localhost:8000}
-      # Azure OBO mode: stable keys for session persistence (optional, but required for restart survival)
+      # Stable keys for session persistence (optional, but required for restart survival)
       - JWT_SIGNING_KEY=${JWT_SIGNING_KEY:-}
       - STORAGE_ENCRYPTION_KEY=${STORAGE_ENCRYPTION_KEY:-}
-      # Optional: fixed port for interactive auth redirect server (must match published port below)
-      - AUTH_REDIRECT_PORT=${AUTH_REDIRECT_PORT:-5577}
-      # Redis for shared proposal storage
+      # Redis for shared cache and proposal storage
       - REDIS_URL=redis://redis:6379/0
     ports:
-      # Interactive auth redirect — browser redirects here after sign-in
-      - "${AUTH_REDIRECT_PORT:-5577}:${AUTH_REDIRECT_PORT:-5577}"
-    volumes:
-      # Persist the token cache across container restarts
-      - dataverse-data:/data
-    stdin_open: true   # Required for stdio MCP transport
-    tty: false
+      - "8000:8000"
     restart: unless-stopped
 
   redis:
@@ -52,5 +44,4 @@ services:
     restart: unless-stopped
 
 volumes:
-  dataverse-data:
   redis-data:

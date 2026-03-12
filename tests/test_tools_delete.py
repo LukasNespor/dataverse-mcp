@@ -12,7 +12,6 @@ import pytest
 import confirmations
 from confirmations import CONFIRM_PHRASE
 
-# Import directly from the module to avoid pulling in auth_tools (needs msal).
 from tools.record_tools import tool_confirm_delete_record, tool_delete_record
 
 

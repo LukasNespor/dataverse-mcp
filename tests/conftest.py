@@ -16,6 +16,7 @@ import types
 # Inject required env vars before config.Settings is instantiated.
 os.environ.setdefault("DATAVERSE_URL", "https://test.crm.dynamics.com")
 os.environ.setdefault("CLIENT_ID", "00000000-0000-0000-0000-000000000000")
+os.environ.setdefault("CLIENT_SECRET", "test-secret")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 
 # Ensure src/ is on the import path.
@@ -31,16 +32,6 @@ def _ensure_stub(name: str) -> None:
     if name not in sys.modules:
         sys.modules[name] = types.ModuleType(name)
 
-
-# msal — used by auth.py (module-level: SerializableTokenCache, PublicClientApplication)
-_msal = types.ModuleType("msal")
-_msal.SerializableTokenCache = type("SerializableTokenCache", (), {
-    "deserialize": lambda self, s: None,
-    "serialize": lambda self: "{}",
-    "has_state_changed": False,
-})
-_msal.PublicClientApplication = type("PublicClientApplication", (), {})
-sys.modules.setdefault("msal", _msal)
 
 # httpx — used by dataverse.py
 _httpx = types.ModuleType("httpx")
@@ -59,9 +50,13 @@ for mod in [
     "fastmcp.server",
     "fastmcp.server.auth",
     "fastmcp.server.auth.providers",
-    "fastmcp.server.auth.providers.azure",
 ]:
     _ensure_stub(mod)
+
+# token_resolver.py imports EntraOBOToken at module level — provide a callable stub
+_azure_mod = types.ModuleType("fastmcp.server.auth.providers.azure")
+_azure_mod.EntraOBOToken = lambda scopes: None
+sys.modules.setdefault("fastmcp.server.auth.providers.azure", _azure_mod)
 
 
 # ---------------------------------------------------------------------------

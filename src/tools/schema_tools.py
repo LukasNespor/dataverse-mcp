@@ -49,11 +49,6 @@ async def tool_whoami(_obo_token: Optional[str] = OBO_TOKEN_DEFAULT) -> Any:
         token = await resolve_token(_obo_token)
         user_oid = get_user_oid(_obo_token)
         return await dataverse.whoami(token=token, user_oid=user_oid)
-    except dataverse.AuthenticationRequiredError:
-        return (
-            "`whoami` failed: not authenticated. "
-            "Call `Sign_in_to_Dataverse` to sign in, then retry."
-        )
     except Exception as e:
         logger.exception("whoami failed")
         return f"Failed to retrieve user identity: {e}"
@@ -87,11 +82,6 @@ async def tool_list_tables(_obo_token: Optional[str] = OBO_TOKEN_DEFAULT) -> Any
     try:
         token = await resolve_token(_obo_token)
         return await dataverse.list_tables(token=token)
-    except dataverse.AuthenticationRequiredError:
-        return (
-            "`list_tables` failed: not authenticated. "
-            "Call `Sign in to Dataverse` to sign in, then retry."
-        )
     except Exception as e:
         logger.exception("list_tables failed")
         return f"Failed to retrieve table list: {e}"
@@ -162,11 +152,6 @@ async def tool_get_schema(
     try:
         token = await resolve_token(_obo_token)
         return await dataverse.get_table_schema(token=token, table_names=table_names)
-    except dataverse.AuthenticationRequiredError:
-        return (
-            "`get_schema` failed: not authenticated. "
-            "Call `Sign_in_to_Dataverse` to sign in, then retry."
-        )
     except Exception as e:
         logger.exception("get_schema failed for %s", table_names)
         return f"Failed to retrieve schema for {table_names}: {e}"

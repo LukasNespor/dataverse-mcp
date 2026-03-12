@@ -20,11 +20,11 @@ SAMPLE_TABLES = "LogicalName|DisplayName|EntitySetName\naccount|Account|accounts
 
 class TestWhoAmI:
     def test_get_returns_none_when_empty(self):
-        assert cache.get_whoami() is None
+        assert cache.get_whoami("nonexistent") is None
 
     def test_set_then_get(self):
-        cache.set_whoami(None, SAMPLE_WHOAMI)
-        result = cache.get_whoami()
+        cache.set_whoami("test-user", SAMPLE_WHOAMI)
+        result = cache.get_whoami("test-user")
         assert result == SAMPLE_WHOAMI
 
     def test_per_user_keying(self):

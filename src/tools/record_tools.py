@@ -29,13 +29,6 @@ from validation import validate_guid, validate_table_name
 logger = logging.getLogger(__name__)
 
 
-def _auth_error_message(tool_name: str) -> str:
-    return (
-        f"`{tool_name}` failed: not authenticated. "
-        "Call `Sign_in_to_Dataverse` to sign in, then retry this tool."
-    )
-
-
 @audit.audited_tool("List_records", "READ")
 async def tool_list_records(
     table: str,
@@ -83,8 +76,6 @@ async def tool_list_records(
             orderby=orderby,
             fetch_all_pages=fetch_all_pages,
         )
-    except dataverse.AuthenticationRequiredError:
-        return _auth_error_message("list_records")
     except Exception as e:
         logger.exception("list_records failed for table %s", table)
         return f"Failed to list records from '{table}': {e}"
@@ -145,8 +136,6 @@ async def tool_create_record(
         token = await resolve_token(_obo_token)
         guid = await dataverse.create_record(table=table, data=data, token=token)
         return f"Record created successfully in '{table}'. ID: {guid}"
-    except dataverse.AuthenticationRequiredError:
-        return _auth_error_message("create_record")
     except Exception as e:
         logger.exception("create_record failed for table %s", table)
         return f"Failed to create record in '{table}': {e}"
@@ -192,8 +181,6 @@ async def tool_update_record(
         token = await resolve_token(_obo_token)
         await dataverse.update_record(table=table, record_id=record_id, data=data, token=token)
         return f"Record {record_id} in '{table}' updated successfully."
-    except dataverse.AuthenticationRequiredError:
-        return _auth_error_message("update_record")
     except Exception as e:
         logger.exception("update_record failed for table %s record %s", table, record_id)
         return f"Failed to update record {record_id} in '{table}': {e}"
@@ -236,8 +223,6 @@ async def tool_delete_record(
     try:
         # Verify auth works before creating a proposal
         await resolve_token(_obo_token)
-    except dataverse.AuthenticationRequiredError:
-        return _auth_error_message("delete_record")
     except Exception as e:
         logger.exception("delete_record auth check failed")
         return f"Failed to verify authentication: {e}"
@@ -324,15 +309,6 @@ async def tool_confirm_delete_record(
             record_id=proposal.record_id,
             token=token,
         )
-    except dataverse.AuthenticationRequiredError:
-        audit.log_confirm(
-            proposal_id=proposal_id,
-            success=False,
-            reason="authentication_required",
-            user_id=user_id,
-            user_name=user_name,
-        )
-        return _auth_error_message("confirm_delete_record")
     except Exception as e:
         logger.exception(
             "confirm_delete_record failed for proposal %s", proposal_id,
